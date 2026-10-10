@@ -4,9 +4,10 @@
   gather_facts: false
 
   roles:
-    - powershell
-    - windows_terminal
-    - sevenzip
-    - git
-    - github_cli
-    - vscode
+    # - powershell
+    # - windows_terminal
+    # - sevenzip
+    # - git
+    # - github_cli
+    # - vscode
+    - node

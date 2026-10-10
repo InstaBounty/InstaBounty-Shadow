@@ -1,0 +1,112 @@
+---
+- name: Check whether Node.js is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $node = 'C:\Program Files\nodejs\node.exe'
+      $installed = Test-Path -LiteralPath $node
+
+      if ($installed) {
+        $versionOutput = & $node --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "Node.js version check failed with exit code $LASTEXITCODE"
+        }
+
+        $version = $versionOutput.TrimStart('v')
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: node_version
+
+- name: Display current Node.js version
+  ansible.builtin.debug:
+    msg: >-
+      Node.js version:
+      {{ node_version.result.version }}
+
+- name: Find current Node.js LTS version
+  ansible.builtin.uri:
+    url: https://nodejs.org/dist/index.json
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: node_releases
+
+- name: Select latest LTS Node.js release
+  ansible.builtin.set_fact:
+    node_lts_release: >-
+      {{
+        node_releases.json
+        | selectattr('lts')
+        | list
+        | first
+      }}
+
+- name: Set Node.js target version
+  ansible.builtin.set_fact:
+    node_target_version: "{{ node_lts_release.version | regex_replace('^v', '') }}"
+    node_msi_url: >-
+      https://nodejs.org/dist/{{ node_lts_release.version }}/node-{{ node_lts_release.version }}-x64.msi
+
+- name: Display target Node.js version
+  ansible.builtin.debug:
+    msg: "Latest Node.js LTS version: {{ node_target_version }}"
+
+- name: Install or upgrade Node.js LTS
+  ansible.windows.win_package:
+    path: "{{ node_msi_url }}"
+    state: present
+  register: node_install
+  when: >-
+    not node_version.result.installed or
+    (node_version.result.version | trim)
+      is version(node_target_version, '<')
+
+- name: Add Node.js to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - 'C:\Program Files\nodejs'
+    scope: machine
+    state: present
+  register: node_path
+
+- name: Verify Node.js installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $node = 'C:\Program Files\nodejs\node.exe'
+
+      if (-not (Test-Path -LiteralPath $node)) {
+        throw "Node.js executable was not found at $node after installation"
+      }
+
+      $version = (& $node --version).TrimStart('v')
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Node.js verification failed with exit code $LASTEXITCODE"
+      }
+
+      $Ansible.Result = $version
+  register: node_version_after
+
+- name: Display installed Node.js version
+  ansible.builtin.debug:
+    msg: "Node.js installed: {{ node_version_after.result | trim }}"
+
+- name: Validate installed Node.js version
+  ansible.builtin.assert:
+    that:
+      - node_version_after.result | trim
+        is version(node_target_version, '>=')
+    fail_msg: >-
+      Node.js {{ node_target_version }} was expected,
+      but {{ node_version_after.result | trim }} is installed.
