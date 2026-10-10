@@ -1,0 +1,96 @@
+---
+- name: Check whether Visual Studio Code is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $code = 'C:\Program Files\Microsoft VS Code\bin\code.cmd'
+      $installed = Test-Path -LiteralPath $code
+
+      if ($installed) {
+        $versionOutput = & $code --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "VS Code version check failed with exit code $LASTEXITCODE"
+        }
+
+        $version = $versionOutput | Select-Object -First 1
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: vscode_version
+
+- name: Display current Visual Studio Code version
+  ansible.builtin.debug:
+    msg: >-
+      Visual Studio Code version:
+      {{ vscode_version.result.version }}
+
+- name: Create temporary Visual Studio Code directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty
+    state: directory
+  when: not vscode_version.result.installed
+
+- name: Download latest stable Visual Studio Code system installer
+  ansible.windows.win_get_url:
+    url: https://update.code.visualstudio.com/latest/win32-x64/stable
+    dest: C:\Temp\InstaBounty\VSCodeSetup.exe
+  when: not vscode_version.result.installed
+
+- name: Install Visual Studio Code
+  ansible.windows.win_package:
+    path: C:\Temp\InstaBounty\VSCodeSetup.exe
+    state: present
+    arguments: >-
+      /VERYSILENT
+      /NORESTART
+      /MERGETASKS="addcontextmenufiles,addcontextmenufolders,addtopath,!runcode"
+  register: vscode_install
+  when: not vscode_version.result.installed
+
+- name: Add Visual Studio Code to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - 'C:\Program Files\Microsoft VS Code\bin'
+    scope: machine
+    state: present
+  register: vscode_path
+
+- name: Verify Visual Studio Code installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $code = 'C:\Program Files\Microsoft VS Code\bin\code.cmd'
+
+      if (-not (Test-Path -LiteralPath $code)) {
+        throw "Visual Studio Code command was not found at $code after installation"
+      }
+
+      $versionOutput = & $code --version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Visual Studio Code verification failed with exit code $LASTEXITCODE"
+      }
+
+      $Ansible.Result = $versionOutput | Select-Object -First 1
+  register: vscode_version_after
+
+- name: Display installed Visual Studio Code version
+  ansible.builtin.debug:
+    msg: >-
+      Visual Studio Code installed:
+      {{ vscode_version_after.result | trim }}
+
+- name: Remove Visual Studio Code installer
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\VSCodeSetup.exe
+    state: absent
+  when: vscode_install.changed | default(false)
