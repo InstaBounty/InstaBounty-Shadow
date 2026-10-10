@@ -1,0 +1,150 @@
+---
+- name: Check whether Python 3.13 is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $python = 'C:\Program Files\Python313\python.exe'
+      $installed = Test-Path -LiteralPath $python
+
+      if ($installed) {
+        $versionOutput = & $python --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "Python version check failed with exit code $LASTEXITCODE"
+        }
+
+        if ($versionOutput -match 'Python ([0-9.]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine installed Python version from: $versionOutput"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: python_version
+
+- name: Display current Python version
+  ansible.builtin.debug:
+    msg: "Python version: {{ python_version.result.version }}"
+
+- name: Find latest Python 3.13 release
+  ansible.builtin.uri:
+    url: https://www.python.org/downloads/
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: python_download_page
+
+- name: Extract latest Python 3.13 version
+  ansible.builtin.set_fact:
+    python_target_version: >-
+      {{
+        python_download_page.content
+        | regex_findall('Python (3[.]13[.][0-9]+)')
+        | first
+      }}
+
+- name: Build official Python x64 installer URL
+  ansible.builtin.set_fact:
+    python_installer_url: >-
+      https://www.python.org/ftp/python/{{ python_target_version }}/python-{{ python_target_version }}-amd64.exe
+
+- name: Display target Python version
+  ansible.builtin.debug:
+    msg: "Latest Python 3.13 version: {{ python_target_version }}"
+
+- name: Create temporary Python installer directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\Python
+    state: directory
+  when: >-
+    not python_version.result.installed or
+    (python_version.result.version | trim)
+      is version(python_target_version, '<')
+
+- name: Download Python installer
+  ansible.windows.win_get_url:
+    url: "{{ python_installer_url }}"
+    dest: C:\Temp\InstaBounty\Python\python-installer.exe
+  when: >-
+    not python_version.result.installed or
+    (python_version.result.version | trim)
+      is version(python_target_version, '<')
+
+- name: Install or upgrade Python 3.13
+  ansible.windows.win_package:
+    path: C:\Temp\InstaBounty\Python\python-installer.exe
+    state: present
+    arguments: >-
+      /quiet
+      InstallAllUsers=1
+      PrependPath=1
+      Include_pip=1
+      Include_launcher=1
+      Include_test=0
+      TargetDir="C:\Program Files\Python313"
+  register: python_install
+  when: >-
+    not python_version.result.installed or
+    (python_version.result.version | trim)
+      is version(python_target_version, '<')
+
+- name: Add Python to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - 'C:\Program Files\Python313'
+      - 'C:\Program Files\Python313\Scripts'
+    scope: machine
+    state: present
+  register: python_path
+
+- name: Verify Python installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $python = 'C:\Program Files\Python313\python.exe'
+
+      if (-not (Test-Path -LiteralPath $python)) {
+        throw "Python executable was not found at $python after installation"
+      }
+
+      $versionOutput = & $python --version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Python verification failed with exit code $LASTEXITCODE"
+      }
+
+      if ($versionOutput -notmatch 'Python ([0-9.]+)') {
+        throw "Unable to determine Python version from: $versionOutput"
+      }
+
+      $Ansible.Result = $Matches[1]
+  register: python_version_after
+
+- name: Display installed Python version
+  ansible.builtin.debug:
+    msg: "Python installed: {{ python_version_after.result | trim }}"
+
+- name: Validate installed Python version
+  ansible.builtin.assert:
+    that:
+      - python_version_after.result | trim
+        is version(python_target_version, '>=')
+    fail_msg: >-
+      Python {{ python_target_version }} was expected,
+      but {{ python_version_after.result | trim }} is installed.
+
+- name: Remove Python installer
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\Python
+    state: absent
+  when: python_install.changed | default(false)
