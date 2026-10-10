@@ -1,0 +1,103 @@
+---
+- name: Check whether uv is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $uv = 'C:\Program Files\uv\uv.exe'
+      $installed = Test-Path -LiteralPath $uv
+
+      if ($installed) {
+        $versionOutput = & $uv --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "uv version check failed with exit code $LASTEXITCODE"
+        }
+
+        if ($versionOutput -match 'uv ([0-9.]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine installed uv version from: $versionOutput"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: uv_version
+
+- name: Display current uv version
+  ansible.builtin.debug:
+    msg: "uv version: {{ uv_version.result.version }}"
+
+- name: Create uv installation directory
+  ansible.windows.win_file:
+    path: C:\Program Files\uv
+    state: directory
+
+- name: Install uv using official installer
+  ansible.windows.win_powershell:
+    script: |
+      $env:UV_INSTALL_DIR = 'C:\Program Files\uv'
+      $env:UV_NO_MODIFY_PATH = '1'
+
+      $installer = Invoke-RestMethod https://astral.sh/uv/install.ps1
+      Invoke-Expression $installer
+  when: not uv_version.result.installed
+
+- name: Add uv to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - 'C:\Program Files\uv'
+    scope: machine
+    state: present
+  register: uv_path
+
+- name: Update uv to latest stable version
+  ansible.windows.win_powershell:
+    script: |
+      $uv = 'C:\Program Files\uv\uv.exe'
+
+      if (-not (Test-Path -LiteralPath $uv)) {
+        throw "uv executable was not found at $uv"
+      }
+
+      & $uv self update
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "uv self update failed with exit code $LASTEXITCODE"
+      }
+  when: uv_version.result.installed
+
+- name: Verify uv installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $uv = 'C:\Program Files\uv\uv.exe'
+
+      if (-not (Test-Path -LiteralPath $uv)) {
+        throw "uv executable was not found at $uv after installation"
+      }
+
+      $versionOutput = & $uv --version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "uv verification failed with exit code $LASTEXITCODE"
+      }
+
+      if ($versionOutput -notmatch 'uv ([0-9.]+)') {
+        throw "Unable to determine uv version from: $versionOutput"
+      }
+
+      $Ansible.Result = $Matches[1]
+  register: uv_version_after
+
+- name: Display installed uv version
+  ansible.builtin.debug:
+    msg: "uv installed: {{ uv_version_after.result | trim }}"
