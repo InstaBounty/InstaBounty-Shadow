@@ -14,3 +14,4 @@
     - node_tools
     - python
     - uv
+    - build_tools

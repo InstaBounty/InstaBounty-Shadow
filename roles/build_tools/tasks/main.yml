@@ -1,0 +1,131 @@
+---
+- name: Check whether Visual Studio Build Tools are installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+      if (-not (Test-Path -LiteralPath $vswhere)) {
+        $Ansible.Result = @{
+          installed = $false
+          installation_path = ''
+          version = 'Not installed'
+        }
+        return
+      }
+
+      $installationPath = & $vswhere `
+        -latest `
+        -products Microsoft.VisualStudio.Product.BuildTools `
+        -requires Microsoft.VisualStudio.Workload.VCTools `
+        -property installationPath
+
+      if ([string]::IsNullOrWhiteSpace($installationPath)) {
+        $Ansible.Result = @{
+          installed = $false
+          installation_path = ''
+          version = 'Not installed'
+        }
+        return
+      }
+
+      $version = & $vswhere `
+        -latest `
+        -products Microsoft.VisualStudio.Product.BuildTools `
+        -requires Microsoft.VisualStudio.Workload.VCTools `
+        -property installationVersion
+
+      $Ansible.Result = @{
+        installed = $true
+        installation_path = $installationPath.Trim()
+        version = $version.Trim()
+      }
+  register: build_tools_status
+
+- name: Display current Visual Studio Build Tools status
+  ansible.builtin.debug:
+    msg:
+      - "Installed: {{ build_tools_status.result.installed }}"
+      - "Version: {{ build_tools_status.result.version }}"
+      - "Path: {{ build_tools_status.result.installation_path }}"
+
+- name: Create temporary Build Tools installer directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\BuildTools
+    state: directory
+  when: not build_tools_status.result.installed
+
+- name: Download Visual Studio Build Tools bootstrapper
+  ansible.windows.win_get_url:
+    url: https://aka.ms/vs/17/release/vs_buildtools.exe
+    dest: C:\Temp\InstaBounty\BuildTools\vs_buildtools.exe
+  when: not build_tools_status.result.installed
+
+- name: Install Visual Studio Build Tools with C++ workload
+  ansible.windows.win_command:
+    cmd: >-
+      C:\Temp\InstaBounty\BuildTools\vs_buildtools.exe
+      --quiet
+      --wait
+      --norestart
+      --nocache
+      --installPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+      --add Microsoft.VisualStudio.Workload.VCTools
+      --includeRecommended
+  register: build_tools_install
+  changed_when: build_tools_install.rc in [0, 3010]
+  failed_when: build_tools_install.rc not in [0, 3010]
+  when: not build_tools_status.result.installed
+
+- name: Report whether Build Tools requested a reboot
+  ansible.builtin.debug:
+    msg: Visual Studio Build Tools installation completed and requested a reboot.
+  when:
+    - build_tools_install is defined
+    - build_tools_install.rc | default(0) == 3010
+
+- name: Verify Visual Studio Build Tools installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+      if (-not (Test-Path -LiteralPath $vswhere)) {
+        throw "vswhere.exe was not found after Build Tools installation"
+      }
+
+      $installationPath = & $vswhere `
+        -latest `
+        -products Microsoft.VisualStudio.Product.BuildTools `
+        -requires Microsoft.VisualStudio.Workload.VCTools `
+        -property installationPath
+
+      if ([string]::IsNullOrWhiteSpace($installationPath)) {
+        throw "Visual Studio Build Tools with the C++ workload were not found"
+      }
+
+      $version = & $vswhere `
+        -latest `
+        -products Microsoft.VisualStudio.Product.BuildTools `
+        -requires Microsoft.VisualStudio.Workload.VCTools `
+        -property installationVersion
+
+      $Ansible.Result = @{
+        installation_path = $installationPath.Trim()
+        version = $version.Trim()
+      }
+  register: build_tools_after
+
+- name: Display installed Visual Studio Build Tools version
+  ansible.builtin.debug:
+    msg:
+      - "Visual Studio Build Tools installed: {{ build_tools_after.result.version }}"
+      - "Installation path: {{ build_tools_after.result.installation_path }}"
+
+- name: Remove Build Tools bootstrapper
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\BuildTools
+    state: absent
+  when: build_tools_install.changed | default(false)
