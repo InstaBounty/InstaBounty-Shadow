@@ -3,6 +3,5 @@
   hosts: shadow
   gather_facts: false
 
-  tasks:
-    - name: Test Windows connectivity
-      ansible.windows.win_ping:
+  roles:
+    - powershell

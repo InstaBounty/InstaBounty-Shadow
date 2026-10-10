@@ -362,3 +362,28 @@ host_vars/shadow.yml
 ```
 
 Both should stay outside source control.
+
+
+01  PowerShell 7
+02  Windows Terminal
+03  7-Zip
+04  Git
+05  GitHub CLI
+06  VS Code
+07  VS Code extensions
+08  Node.js LTS
+09  Corepack + pnpm
+10  Python 3.13
+11  uv
+12  Visual Studio Build Tools
+13  Docker Desktop
+14  Foundry
+15  Solidity tooling
+16  JDK
+17  Android Studio
+18  Android SDK / adb / emulator
+19  NVIDIA driver verification
+20  Ollama
+21  LLM models
+22  Embedding models
+23  Open WebUI

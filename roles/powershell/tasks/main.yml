@@ -1,0 +1,78 @@
+---
+- name: Check whether PowerShell 7 is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+      $installed = Test-Path -LiteralPath $pwsh
+      $version = if ($installed) {
+        & $pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+        if ($LASTEXITCODE -ne 0) {
+          throw "PowerShell version check failed with exit code $LASTEXITCODE"
+        }
+      } else { 'Not installed' }
+      $Ansible.Result = @{ installed = $installed; version = $version }
+  register: powershell_version
+
+- name: Display current PowerShell 7 version
+  ansible.builtin.debug:
+    msg: >-
+      PowerShell 7 version: {{ powershell_version.result.version | trim }}
+
+- name: Find the latest stable PowerShell release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/PowerShell/PowerShell/releases/latest
+    headers:
+      Accept: application/vnd.github+json
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: powershell_release
+
+- name: Select the official Windows x64 MSI
+  ansible.builtin.set_fact:
+    powershell_target_version: "{{ powershell_release.json.tag_name | regex_replace('^v', '') }}"
+    powershell_msi_urls: >-
+      {{ powershell_release.json.assets
+         | selectattr('name', 'match', '^PowerShell-.*-win-x64[.]msi$')
+         | map(attribute='browser_download_url') | list }}
+
+- name: Validate the PowerShell installer selection
+  ansible.builtin.assert:
+    that:
+      - powershell_msi_urls | length == 1
+    fail_msg: The latest PowerShell release did not contain exactly one Windows x64 MSI.
+
+- name: Install or upgrade PowerShell 7 using the official MSI
+  ansible.windows.win_package:
+    path: "{{ powershell_msi_urls | first }}"
+    state: present
+    arguments: ADD_PATH=1
+  register: powershell_install
+  when: >-
+    not powershell_version.result.installed or
+    (powershell_version.result.version | trim) is version(powershell_target_version, '<')
+
+- name: Report whether the installer requires a reboot
+  ansible.builtin.debug:
+    msg: PowerShell installation completed; Windows reports that a reboot is required.
+  when: powershell_install.reboot_required | default(false)
+
+- name: Verify PowerShell 7 installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+      if (-not (Test-Path -LiteralPath $pwsh)) {
+        throw "PowerShell 7 executable was not found at $pwsh after MSI installation"
+      }
+      $version = & $pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+      if ($LASTEXITCODE -ne 0) {
+        throw "PowerShell verification failed with exit code $LASTEXITCODE"
+      }
+      $Ansible.Result = $version
+  register: powershell_version_after
+
+- name: Display installed PowerShell 7 version
+  ansible.builtin.debug:
+    msg: "PowerShell 7 installed: {{ powershell_version_after.result | trim }}"
