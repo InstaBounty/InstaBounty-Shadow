@@ -1,0 +1,116 @@
+---
+- name: Check whether Windows Terminal is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $package = Get-AppxPackage -Name Microsoft.WindowsTerminal -ErrorAction SilentlyContinue
+
+      if ($null -eq $package) {
+        $Ansible.Result = @{
+          installed = $false
+          version = 'Not installed'
+        }
+      }
+      else {
+        $Ansible.Result = @{
+          installed = $true
+          version = $package.Version.ToString()
+        }
+      }
+  register: windows_terminal_version
+
+- name: Find the latest stable Windows Terminal release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/microsoft/terminal/releases/latest
+    headers:
+      Accept: application/vnd.github+json
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: windows_terminal_release
+
+- name: Select the official Windows Terminal MSIX bundle
+  ansible.builtin.set_fact:
+    windows_terminal_target_version: >-
+      {{ windows_terminal_release.json.tag_name
+         | regex_replace('^v', '') }}
+    windows_terminal_msix_urls: >-
+      {{ windows_terminal_release.json.assets
+         | selectattr('name', 'match', '^Microsoft\.WindowsTerminal_.*_8wekyb3d8bbwe\.msixbundle$')
+         | map(attribute='browser_download_url')
+         | list }}
+
+- name: Validate Windows Terminal installer selection
+  ansible.builtin.assert:
+    that:
+      - windows_terminal_msix_urls | length == 1
+    fail_msg: >-
+      The latest Windows Terminal release did not contain exactly one stable Windows Terminal MSIX bundle.
+
+- name: Create Windows Terminal download directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\WindowsTerminal
+    state: directory
+  when: >-
+    not windows_terminal_version.result.installed or
+    (windows_terminal_version.result.version | trim)
+      is version(windows_terminal_target_version, '<')
+
+- name: Download Windows Terminal MSIX bundle
+  ansible.windows.win_get_url:
+    url: "{{ windows_terminal_msix_urls | first }}"
+    dest: C:\Temp\InstaBounty\WindowsTerminal\WindowsTerminal.msixbundle
+  when: >-
+    not windows_terminal_version.result.installed or
+    (windows_terminal_version.result.version | trim)
+      is version(windows_terminal_target_version, '<')
+
+- name: Install or upgrade Windows Terminal
+  ansible.windows.win_powershell:
+    script: |
+      $bundle = 'C:\Temp\InstaBounty\WindowsTerminal\WindowsTerminal.msixbundle'
+
+      if (-not (Test-Path -LiteralPath $bundle)) {
+        throw "Windows Terminal installer was not found at $bundle"
+      }
+
+      Add-AppxPackage -Path $bundle -ForceApplicationShutdown -ErrorAction Stop
+  when: >-
+    not windows_terminal_version.result.installed or
+    (windows_terminal_version.result.version | trim)
+      is version(windows_terminal_target_version, '<')
+
+- name: Verify Windows Terminal installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $package = Get-AppxPackage -Name Microsoft.WindowsTerminal -ErrorAction SilentlyContinue
+
+      if ($null -eq $package) {
+        throw "Windows Terminal was not found after installation"
+      }
+
+      $Ansible.Result = $package.Version.ToString()
+  register: windows_terminal_version_after
+
+- name: Display installed Windows Terminal version
+  ansible.builtin.debug:
+    msg: >-
+      Windows Terminal installed:
+      {{ windows_terminal_version_after.result | trim }}
+
+- name: Validate installed Windows Terminal version
+  ansible.builtin.assert:
+    that:
+      - windows_terminal_version_after.result | trim
+        is version(windows_terminal_target_version, '>=')
+    fail_msg: >-
+      Windows Terminal {{ windows_terminal_target_version }} was expected,
+      but {{ windows_terminal_version_after.result | trim }} is installed.
+
+- name: Remove Windows Terminal installer
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\WindowsTerminal
+    state: absent
