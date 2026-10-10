@@ -1,0 +1,195 @@
+---
+- name: Check whether Git is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $git = 'C:\Program Files\Git\cmd\git.exe'
+      $installed = Test-Path -LiteralPath $git
+
+      if ($installed) {
+        $versionOutput = & $git --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "Git version check failed with exit code $LASTEXITCODE"
+        }
+
+        if ($versionOutput -match 'git version ([0-9.]+)') {
+          $version = $Matches[1]
+        } else {
+          throw "Unable to determine installed Git version from: $versionOutput"
+        }
+      } else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version = $version
+      }
+  register: git_version
+
+- name: Display current Git version
+  ansible.builtin.debug:
+    msg: >-
+      Git version {{ git_version.result.version }}
+
+- name: Find latest stable Git for Windows release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/git-for-windows/git/releases/latest
+    headers:
+      Accept: application/vnd.github+json
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: git_release
+
+- name: Select official Git for Windows x64 installer
+  ansible.builtin.set_fact:
+    git_target_version: >-
+      {{
+        git_release.json.tag_name
+        | regex_replace('^v', '')
+        | regex_replace('[.]windows[.][0-9]+$', '')
+      }}
+    git_installer_urls: >-
+      {{
+        git_release.json.assets
+        | selectattr('name', 'match', '^Git-.*-64-bit[.]exe$')
+        | map(attribute='browser_download_url')
+        | list
+      }}
+
+- name: Validate Git installer selection
+  ansible.builtin.assert:
+    that:
+      - git_installer_urls | length == 1
+    fail_msg: >-
+      The latest Git for Windows release did not contain exactly
+      one x64 installer.
+
+- name: Display target Git version
+  ansible.builtin.debug:
+    msg: "Latest stable Git for Windows version: {{ git_target_version }}"
+
+- name: Create temporary Git installer directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\Git
+    state: directory
+  when: >-
+    not git_version.result.installed or
+    (git_version.result.version | trim)
+      is version(git_target_version, '<')
+
+- name: Download Git for Windows installer
+  ansible.windows.win_get_url:
+    url: "{{ git_installer_urls | first }}"
+    dest: C:\Temp\InstaBounty\Git\GitSetup.exe
+  when: >-
+    not git_version.result.installed or
+    (git_version.result.version | trim)
+      is version(git_target_version, '<')
+
+- name: Install or upgrade Git for Windows
+  ansible.windows.win_package:
+    path: C:\Temp\InstaBounty\Git\GitSetup.exe
+    state: present
+    arguments: >-
+      /VERYSILENT
+      /NORESTART
+      /NOCANCEL
+      /SP-
+      /CLOSEAPPLICATIONS
+      /RESTARTAPPLICATIONS
+      /o:PathOption=CmdTools
+      /o:SSHOption=OpenSSH
+      /o:DefaultBranchOption=main
+      /o:UseCredentialManager=Enabled
+  register: git_install
+  when: >-
+    not git_version.result.installed or
+    (git_version.result.version | trim)
+      is version(git_target_version, '<')
+
+- name: Add Git command tools to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - 'C:\Program Files\Git\cmd'
+      - 'C:\Program Files\Git\usr\bin'
+    scope: machine
+    state: present
+  register: git_path
+
+- name: Reboot after Git configuration
+  ansible.windows.win_reboot:
+    msg: Rebooting to apply Git command-line configuration
+    reboot_timeout: 600
+  when:
+    - git_install.changed | default(false) or git_path.changed
+
+- name: Verify Git after reboot
+  ansible.windows.win_command:
+    cmd: git --version
+  register: git_command_version
+  changed_when: false
+
+- name: Display Git command-line version
+  ansible.builtin.debug:
+    msg: "{{ git_command_version.stdout | trim }}"
+
+- name: Extract installed Git version
+  ansible.builtin.set_fact:
+    git_installed_version: >-
+      {{
+        git_command_version.stdout
+        | regex_findall('^git version ([0-9]+(?:[.][0-9]+)*)')
+        | first
+        | default('')
+      }}
+
+- name: Validate installed Git version
+  ansible.builtin.assert:
+    that:
+      - git_installed_version | length > 0
+      - git_installed_version
+        is version(git_target_version, '>=')
+    fail_msg: >-
+      Git {{ git_target_version }} was expected,
+      but the version command returned: {{ git_command_version.stdout | trim }}
+
+- name: Verify Git and Bash are available
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $git = 'C:\Program Files\Git\cmd\git.exe'
+      $bash = 'C:\Program Files\Git\bin\bash.exe'
+
+      if (-not (Test-Path -LiteralPath $git)) {
+        throw "Git executable was not found at $git"
+      }
+
+      if (-not (Test-Path -LiteralPath $bash)) {
+        throw "Git Bash executable was not found at $bash"
+      }
+
+      $Ansible.Result = @{
+        git  = (& $git --version)
+        bash = (& $bash --version | Select-Object -First 1)
+      }
+  register: git_tools
+
+- name: Display Git tools
+  ansible.builtin.debug:
+    msg:
+      - "{{ git_tools.result.git }}"
+      - "{{ git_tools.result.bash }}"
+
+- name: Remove Git installer
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\Git
+    state: absent
+  when: >-
+    not git_version.result.installed or
+    (git_version.result.version | trim)
+      is version(git_target_version, '<')
