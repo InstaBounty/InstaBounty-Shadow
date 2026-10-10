@@ -1,0 +1,126 @@
+---
+- name: Check whether 7-Zip is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+      $installed = Test-Path -LiteralPath $sevenZip
+
+      if ($installed) {
+        $output = & $sevenZip 2>&1
+
+        $versionLine = $output |
+          Where-Object { $_ -match '^7-Zip\s+([0-9.]+)' } |
+          Select-Object -First 1
+        
+        if ($versionLine-match '^7-Zip\s+([0-9.]+)') {
+          $version = $Matches[1]
+        } else {
+          throw "Unable to determine installed 7-Zip version"
+        }
+      } else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version = $version
+      }
+  register: sevenzip_version
+
+- name: Display current 7-Zip version
+  ansible.builtin.debug:
+    msg: >-
+      7-Zip version: {{ sevenzip_version.result.version }}
+
+- name: Find latest stable 7-Zip version
+  ansible.builtin.uri:
+    url: https://www.7-zip.org/download.html
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: sevenzip_download_page
+
+- name: Find 7-Zip versions on the download page
+  ansible.builtin.set_fact:
+    sevenzip_download_versions: >-
+      {{
+        sevenzip_download_page.content
+        | striptags
+        | regex_findall('Download\s+7-Zip\s+([0-9]+\.[0-9]+)')
+      }}
+
+- name: Validate 7-Zip version extraction
+  ansible.builtin.assert:
+    that:
+      - sevenzip_download_versions | length > 0
+    fail_msg: >-
+      Could not find a 7-Zip version on https://www.7-zip.org/download.html.
+      The download page format may have changed.
+
+- name: Extract latest 7-Zip version
+  ansible.builtin.set_fact:
+    sevenzip_target_version: "{{ sevenzip_download_versions | first }}"
+
+- name: Build official 7-Zip x64 MSI URL
+  ansible.builtin.set_fact:
+    sevenzip_version_compact: "{{ sevenzip_target_version | replace('.', '') }}"
+    sevenzip_msi_url: >-
+      https://www.7-zip.org/a/7z{{ sevenzip_target_version | replace('.', '') }}-x64.msi
+
+- name: Display target 7-Zip version
+  ansible.builtin.debug:
+    msg: "Latest stable 7-Zip version: {{ sevenzip_target_version }}"
+
+- name: Install or upgrade 7-Zip
+  ansible.windows.win_package:
+    path: "{{ sevenzip_msi_url }}"
+    state: present
+  register: sevenzip_install
+  when: >-
+    not sevenzip_version.result.installed or
+    (sevenzip_version.result.version | trim)
+      is version(sevenzip_target_version, '<')
+
+- name: Report whether 7-Zip installation requires a reboot
+  ansible.builtin.debug:
+    msg: 7-Zip installation completed; Windows reports that a reboot is required
+  when: sevenzip_install.reboot_required | default(false)
+
+- name: Verify 7-Zip installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+
+      if (-not (Test-Path -LiteralPath $sevenZip)) {
+        throw "7-Zip executable was not found at $sevenZip after installation"
+      }
+
+      $output = & $sevenZip 2>&1
+
+      $versionLine = $output |
+        Where-Object { $_ -match '^7-Zip\s+([0-9.]+)' } |
+        Select-Object -First 1
+      
+      if ($versionLine -notmatch '7-Zip\s+([0-9.]+)') {
+        throw "Unable to determine installed 7-Zip version"
+      }
+
+      $Ansible.Result = $Matches[1]
+  register: sevenzip_version_after
+
+- name: Display installed 7-Zip version
+  ansible.builtin.debug:
+    msg: "7-Zip installed: {{ sevenzip_version_after.result }}"
+
+- name: Validate installed 7-Zip version
+  ansible.builtin.assert:
+    that:
+      - sevenzip_version_after.result | trim
+        is version(sevenzip_target_version, '>=')
+    fail_msg: >-
+      7-Zip {{ sevenzip_target_version }} was expected,
+      but {{ sevenzip_version_after.result | trim }} is installed.

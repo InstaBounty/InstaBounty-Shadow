@@ -6,3 +6,4 @@
   roles:
     - powershell
     - windows_terminal
+    - sevenzip
