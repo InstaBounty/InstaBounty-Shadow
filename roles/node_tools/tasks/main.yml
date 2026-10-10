@@ -1,0 +1,208 @@
+---
+- name: Check whether Corepack is installed
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $Ansible.Changed = $false
+
+      $node = 'C:\Program Files\nodejs\node.exe'
+
+      if (-not (Test-Path -LiteralPath $node)) {
+        throw "Node.js was not found at $node. Run the node role first."
+      }
+
+      $corepack = Get-Command corepack.cmd -ErrorAction SilentlyContinue
+
+      if ($null -eq $corepack) {
+        $Ansible.Result = @{
+          installed = $false
+          version   = 'Not installed'
+        }
+      }
+      else {
+        $version = & $corepack.Source --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "Corepack version check failed with exit code $LASTEXITCODE"
+        }
+
+        $Ansible.Result = @{
+          installed = $true
+          version   = $version.Trim()
+        }
+      }
+  register: corepack_version
+
+- name: Display current Corepack version
+  ansible.builtin.debug:
+    msg: "Corepack version: {{ corepack_version.result.version }}"
+
+- name: Get latest stable Corepack version
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $Ansible.Changed = $false
+
+      $npm = 'C:\Program Files\nodejs\npm.cmd'
+
+      if (-not (Test-Path -LiteralPath $npm)) {
+        throw "npm was not found at $npm"
+      }
+
+      $version = & $npm view corepack version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Unable to determine latest Corepack version"
+      }
+
+      $Ansible.Result = $version.Trim()
+  register: corepack_latest
+
+- name: Install or upgrade Corepack
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $npm = 'C:\Program Files\nodejs\npm.cmd'
+
+      & $npm install --global "corepack@{{ corepack_latest.result }}"
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Corepack installation failed with exit code $LASTEXITCODE"
+      }
+  when: >-
+    not corepack_version.result.installed or
+    (corepack_version.result.version | trim)
+      is version(corepack_latest.result | trim, '<')
+
+- name: Enable pnpm through Corepack
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $corepack = Get-Command corepack.cmd -ErrorAction Stop
+
+      & $corepack.Source enable pnpm
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Corepack failed to enable pnpm"
+      }
+
+- name: Check whether pnpm is installed
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $Ansible.Changed = $false
+
+      $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+
+      if ($null -eq $pnpm) {
+        $Ansible.Result = @{
+          installed = $false
+          version   = 'Not installed'
+        }
+      }
+      else {
+        $version = & $pnpm.Source --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "pnpm version check failed with exit code $LASTEXITCODE"
+        }
+
+        $Ansible.Result = @{
+          installed = $true
+          version   = $version.Trim()
+        }
+      }
+  register: pnpm_version
+
+- name: Display current pnpm version
+  ansible.builtin.debug:
+    msg: "pnpm version: {{ pnpm_version.result.version }}"
+
+- name: Get latest stable pnpm version
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $Ansible.Changed = $false
+
+      $npm = 'C:\Program Files\nodejs\npm.cmd'
+
+      $version = & $npm view pnpm version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Unable to determine latest pnpm version"
+      }
+
+      $Ansible.Result = $version.Trim()
+  register: pnpm_latest
+
+- name: Install latest pnpm through Corepack
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $corepack = Get-Command corepack.cmd -ErrorAction Stop
+
+      & $corepack.Source prepare "pnpm@{{ pnpm_latest.result }}" --activate
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Corepack failed to activate pnpm {{ pnpm_latest.result }}"
+      }
+  when: >-
+    not pnpm_version.result.installed or
+    (pnpm_version.result.version | trim)
+      is version(pnpm_latest.result | trim, '<')
+
+- name: Verify Corepack installation
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $Ansible.Changed = $false
+
+      $corepack = Get-Command corepack.cmd -ErrorAction Stop
+      $version = & $corepack.Source --version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Corepack verification failed"
+      }
+
+      $Ansible.Result = $version.Trim()
+  register: corepack_version_after
+
+- name: Verify pnpm installation
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM may still have the PATH from before Node.js was installed.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+
+      $Ansible.Changed = $false
+
+      $pnpm = Get-Command pnpm.cmd -ErrorAction Stop
+      $version = & $pnpm.Source --version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "pnpm verification failed"
+      }
+
+      $Ansible.Result = $version.Trim()
+  register: pnpm_version_after
+
+- name: Display installed Node package-management tools
+  ansible.builtin.debug:
+    msg:
+      - "Corepack installed: {{ corepack_version_after.result }}"
+      - "pnpm installed: {{ pnpm_version_after.result }}"
