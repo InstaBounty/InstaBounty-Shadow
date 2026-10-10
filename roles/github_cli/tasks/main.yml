@@ -1,0 +1,152 @@
+---
+- name: Check whether GitHub CLI is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $gh = 'C:\Program Files\GitHub CLI\gh.exe'
+      $installed = Test-Path -LiteralPath $gh
+
+      if ($installed) {
+        $versionOutput = & $gh --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "GitHub CLI version check failed with exit code $LASTEXITCODE"
+        }
+
+        if ($versionOutput[0] -match 'gh version ([0-9.]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine GitHub CLI version from: $($versionOutput[0])"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: github_cli_version
+
+- name: Display current GitHub CLI version
+  ansible.builtin.debug:
+    msg: >-
+      GitHub CLI version:
+      {{ github_cli_version.result.version }}
+
+- name: Find latest stable GitHub CLI release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/cli/cli/releases/latest
+    headers:
+      Accept: application/vnd.github+json
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: github_cli_release
+
+- name: Select official GitHub CLI Windows x64 MSI
+  ansible.builtin.set_fact:
+    github_cli_target_version: >-
+      {{
+        github_cli_release.json.tag_name
+        | regex_replace('^v', '')
+      }}
+    github_cli_msi_urls: >-
+      {{
+        github_cli_release.json.assets
+        | selectattr('name', 'match', '^gh_.*_windows_amd64[.]msi$')
+        | map(attribute='browser_download_url')
+        | list
+      }}
+
+- name: Validate GitHub CLI installer selection
+  ansible.builtin.assert:
+    that:
+      - github_cli_msi_urls | length == 1
+    fail_msg: >-
+      The latest GitHub CLI release did not contain exactly
+      one Windows x64 MSI installer.
+
+- name: Display target GitHub CLI version
+  ansible.builtin.debug:
+    msg: "Latest stable GitHub CLI version: {{ github_cli_target_version }}"
+
+- name: Install or upgrade GitHub CLI
+  ansible.windows.win_package:
+    path: "{{ github_cli_msi_urls | first }}"
+    state: present
+  register: github_cli_install
+  when: >-
+    not github_cli_version.result.installed or
+    (github_cli_version.result.version | trim)
+      is version(github_cli_target_version, '<')
+
+- name: Add GitHub CLI to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - 'C:\Program Files\GitHub CLI'
+    scope: machine
+    state: present
+  register: github_cli_path
+
+- name: Reboot if GitHub CLI installation or PATH changed
+  ansible.windows.win_reboot:
+    msg: Rebooting to apply GitHub CLI command-line configuration
+    reboot_timeout: 900
+    connect_timeout: 10
+    post_reboot_delay: 30
+    test_command: 'Write-Output "ready"'
+  when:
+    - github_cli_install.changed | default(false) or github_cli_path.changed
+
+- name: Ensure OpenSSH starts automatically
+  ansible.windows.win_service:
+    name: sshd
+    start_mode: auto
+    state: started
+
+- name: Ensure Tailscale starts automatically
+  ansible.windows.win_service:
+    name: Tailscale
+    start_mode: auto
+    state: started
+
+- name: Verify GitHub CLI installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $gh = 'C:\Program Files\GitHub CLI\gh.exe'
+
+      if (-not (Test-Path -LiteralPath $gh)) {
+        throw "GitHub CLI executable was not found at $gh after installation"
+      }
+
+      $versionOutput = & $gh --version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "GitHub CLI verification failed with exit code $LASTEXITCODE"
+      }
+
+      if ($versionOutput[0] -notmatch 'gh version ([0-9.]+)') {
+        throw "Unable to determine GitHub CLI version from: $($versionOutput[0])"
+      }
+
+      $Ansible.Result = $Matches[1]
+  register: github_cli_version_after
+
+- name: Display installed GitHub CLI version
+  ansible.builtin.debug:
+    msg: "GitHub CLI installed: {{ github_cli_version_after.result | trim }}"
+
+- name: Validate installed GitHub CLI version
+  ansible.builtin.assert:
+    that:
+      - github_cli_version_after.result | trim
+        is version(github_cli_target_version, '>=')
+    fail_msg: >-
+      GitHub CLI {{ github_cli_target_version }} was expected,
+      but {{ github_cli_version_after.result | trim }} is installed.
