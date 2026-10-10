@@ -1,0 +1,8 @@
+---
+- name: Verify InstaBounty Shadow workstation
+  hosts: shadow
+  gather_facts: false
+
+  tasks:
+    - name: Test Windows connectivity
+      ansible.windows.win_ping:
