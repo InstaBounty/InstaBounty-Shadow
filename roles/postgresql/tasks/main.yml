@@ -1,0 +1,300 @@
+---
+- name: Define PostgreSQL configuration
+  ansible.builtin.set_fact:
+    postgresql_major_version: "18"
+    postgresql_version: "18.6"
+    postgresql_installer_revision: "4"
+
+    postgresql_install_dir: 'C:\Program Files\PostgreSQL\18'
+    postgresql_data_dir: 'C:\Program Files\PostgreSQL\18\data'
+    postgresql_temp_dir: 'C:\Temp\InstaBounty\PostgreSQL'
+
+    postgresql_service_name: 'postgresql-x64-18'
+    postgresql_port: 5432
+
+    postgresql_installer_url: >-
+      https://get.enterprisedb.com/postgresql/postgresql-18.6-4-windows-x64.exe
+
+
+# ---------------------------------------------------------
+# Validate configuration
+# ---------------------------------------------------------
+
+- name: Validate PostgreSQL password is configured
+  ansible.builtin.assert:
+    that:
+      - postgresql_superuser_password is defined
+      - postgresql_superuser_password | length >= 12
+    fail_msg: >-
+      postgresql_superuser_password must be defined in the
+      untracked host_vars/shadow.yml file and should be at least
+      12 characters long.
+  no_log: true
+
+
+# ---------------------------------------------------------
+# Check existing installation
+# ---------------------------------------------------------
+
+- name: Check whether PostgreSQL is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $psql = 'C:\Program Files\PostgreSQL\18\bin\psql.exe'
+      $installed = Test-Path -LiteralPath $psql
+
+      if ($installed) {
+        $versionOutput = & $psql --version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "PostgreSQL version check failed with exit code $LASTEXITCODE"
+        }
+
+        if ($versionOutput -match 'psql \(PostgreSQL\) ([0-9.]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine PostgreSQL version from: $versionOutput"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: postgresql_status
+
+- name: Display current PostgreSQL version
+  ansible.builtin.debug:
+    msg:
+      - "PostgreSQL installed: {{ postgresql_status.result.installed }}"
+      - "PostgreSQL version: {{ postgresql_status.result.version }}"
+
+
+# ---------------------------------------------------------
+# Download installer
+# ---------------------------------------------------------
+
+- name: Create PostgreSQL temporary directory
+  ansible.windows.win_file:
+    path: "{{ postgresql_temp_dir }}"
+    state: directory
+  when: >-
+    not postgresql_status.result.installed or
+    (postgresql_status.result.version | trim)
+      is version(postgresql_version, '<')
+
+- name: Download PostgreSQL installer
+  ansible.windows.win_get_url:
+    url: "{{ postgresql_installer_url }}"
+    dest: "{{ postgresql_temp_dir }}\\postgresql-installer.exe"
+  when: >-
+    not postgresql_status.result.installed or
+    (postgresql_status.result.version | trim)
+      is version(postgresql_version, '<')
+
+
+# ---------------------------------------------------------
+# Install PostgreSQL
+# ---------------------------------------------------------
+
+- name: Install or upgrade PostgreSQL
+  when: >-
+    not postgresql_status.result.installed or
+    (postgresql_status.result.version | trim)
+      is version(postgresql_version, '<')
+  block:
+    - name: Resolve Windows identity for PostgreSQL installer ACLs
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+
+          # OpenSSH may set USERDOMAIN to WORKGROUP for a local account.
+          # The installer needs the actual account domain when setting ACLs.
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $account = $identity.Name -split '\\', 2
+
+          if ($account.Count -ne 2) {
+            throw "Unable to resolve the Windows account domain for the PostgreSQL installer"
+          }
+
+          $Ansible.Result = @{
+            domain = $account[0]
+            username = $account[1]
+          }
+      register: postgresql_installer_identity
+
+    - name: Create PostgreSQL installer working directory
+      ansible.windows.win_file:
+        path: '{{ postgresql_temp_dir }}\work'
+        state: directory
+
+    - name: Run PostgreSQL installer
+      ansible.windows.win_command:
+        argv:
+          - '{{ postgresql_temp_dir }}\postgresql-installer.exe'
+          - --mode
+          - unattended
+          - --unattendedmodeui
+          - none
+          - --prefix
+          - '{{ postgresql_install_dir }}'
+          - --datadir
+          - '{{ postgresql_data_dir }}'
+          - --serverport
+          - '{{ postgresql_port | string }}'
+          - --servicename
+          - '{{ postgresql_service_name }}'
+          - --superaccount
+          - postgres
+          - --superpassword
+          - '{{ postgresql_superuser_password }}'
+          - --servicepassword
+          - '{{ postgresql_superuser_password }}'
+          - --enable-components
+          - server,commandlinetools
+          - --disable-components
+          - pgAdmin,stackbuilder
+          - --enable_acledit
+          - '1'
+      environment:
+        USERDOMAIN: '{{ postgresql_installer_identity.result.domain }}'
+        USERNAME: '{{ postgresql_installer_identity.result.username }}'
+        TEMP: '{{ postgresql_temp_dir }}\work'
+        TMP: '{{ postgresql_temp_dir }}\work'
+      register: postgresql_install
+      no_log: true
+      changed_when: postgresql_install.rc == 0
+      failed_when: postgresql_install.rc != 0
+  rescue:
+    - name: Report PostgreSQL installer failure without credentials
+      ansible.builtin.fail:
+        msg: >-
+          PostgreSQL installer failed with exit code
+          {{ postgresql_install.rc | default('unavailable') }}.
+          stdout: {{ postgresql_install.stdout | default('')
+            | replace(postgresql_superuser_password, '[REDACTED]') }}
+          stderr: {{ postgresql_install.stderr | default('')
+            | replace(postgresql_superuser_password, '[REDACTED]') }}
+          If no explanation appears above, inspect the install-postgresql.log
+          file under {{ postgresql_temp_dir }}\work.
+
+
+# ---------------------------------------------------------
+# PATH
+# ---------------------------------------------------------
+
+- name: Add PostgreSQL tools to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - "{{ postgresql_install_dir }}\\bin"
+    scope: machine
+    state: present
+  register: postgresql_path
+
+
+# ---------------------------------------------------------
+# Service
+# ---------------------------------------------------------
+
+- name: Ensure PostgreSQL service is running
+  ansible.windows.win_service:
+    name: "{{ postgresql_service_name }}"
+    start_mode: auto
+    state: started
+
+
+# ---------------------------------------------------------
+# Verify binaries
+# ---------------------------------------------------------
+
+- name: Verify PostgreSQL installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $psql = 'C:\Program Files\PostgreSQL\18\bin\psql.exe'
+      $postgres = 'C:\Program Files\PostgreSQL\18\bin\postgres.exe'
+
+      if (-not (Test-Path -LiteralPath $psql)) {
+        throw "psql.exe was not found at $psql"
+      }
+
+      if (-not (Test-Path -LiteralPath $postgres)) {
+        throw "postgres.exe was not found at $postgres"
+      }
+
+      $versionOutput = & $psql --version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "PostgreSQL verification failed"
+      }
+
+      if ($versionOutput -notmatch 'psql \(PostgreSQL\) ([0-9.]+)') {
+        throw "Unable to determine installed PostgreSQL version"
+      }
+
+      $Ansible.Result = @{
+        version = $Matches[1]
+        psql    = $psql
+        postgres = $postgres
+      }
+  register: postgresql_after
+
+- name: Display installed PostgreSQL details
+  ansible.builtin.debug:
+    msg:
+      - "PostgreSQL installed: {{ postgresql_after.result.version }}"
+      - "psql: {{ postgresql_after.result.psql }}"
+      - "Server: {{ postgresql_after.result.postgres }}"
+
+
+# ---------------------------------------------------------
+# Verify server connectivity
+# ---------------------------------------------------------
+
+- name: Verify PostgreSQL server is accepting connections
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $env:PGPASSWORD = '{{ postgresql_superuser_password }}'
+
+      $psql = 'C:\Program Files\PostgreSQL\18\bin\psql.exe'
+
+      $result = & $psql `
+        --host localhost `
+        --port {{ postgresql_port }} `
+        --username postgres `
+        --dbname postgres `
+        --tuples-only `
+        --no-align `
+        --command 'SELECT version();'
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Unable to connect to PostgreSQL"
+      }
+
+      $Ansible.Result = $result.Trim()
+  register: postgresql_connection_test
+  no_log: true
+
+- name: Display PostgreSQL connection result
+  ansible.builtin.debug:
+    msg: "PostgreSQL server connection successful."
+
+
+# ---------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------
+
+- name: Remove PostgreSQL temporary installer directory
+  ansible.windows.win_file:
+    path: "{{ postgresql_temp_dir }}"
+    state: absent
+  when: postgresql_install.changed | default(false)
+  

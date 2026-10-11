@@ -1,3 +1,5 @@
 ---
 ansible_host: YOUR_TAILSCALE_IP
 ansible_user: YOUR_WINDOWS_USERNAME
+
+postgresql_superuser_password: "YOUR_STRONG_PASSWORD_HERE"
