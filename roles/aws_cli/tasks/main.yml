@@ -1,0 +1,188 @@
+---
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
+- name: Define AWS CLI configuration
+  ansible.builtin.set_fact:
+    aws_cli_install_dir: 'C:\Program Files\Amazon\AWSCLIV2'
+    aws_cli_executable: 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
+    aws_cli_temp_dir: 'C:\Temp\InstaBounty\AWSCLI'
+    aws_cli_installer_url: 'https://awscli.amazonaws.com/AWSCLIV2.msi'
+
+
+# ---------------------------------------------------------
+# Check existing installation
+# ---------------------------------------------------------
+
+- name: Check whether AWS CLI v2 is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $aws = 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
+      $installed = Test-Path -LiteralPath $aws
+
+      if ($installed) {
+        $versionOutput = & $aws --version 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "AWS CLI version check failed with exit code $LASTEXITCODE"
+        }
+
+        if ($versionOutput -match 'aws-cli/([0-9.]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine AWS CLI version from: $versionOutput"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: aws_cli_status
+
+- name: Display current AWS CLI status
+  ansible.builtin.debug:
+    msg:
+      - "AWS CLI installed: {{ aws_cli_status.result.installed }}"
+      - "AWS CLI version: {{ aws_cli_status.result.version }}"
+
+
+# ---------------------------------------------------------
+# Download installer
+# ---------------------------------------------------------
+
+- name: Create AWS CLI temporary directory
+  ansible.windows.win_file:
+    path: "{{ aws_cli_temp_dir }}"
+    state: directory
+
+- name: Download latest AWS CLI v2 MSI
+  ansible.windows.win_get_url:
+    url: "{{ aws_cli_installer_url }}"
+    dest: "{{ aws_cli_temp_dir }}\\AWSCLIV2.msi"
+
+
+# ---------------------------------------------------------
+# Install / update
+# ---------------------------------------------------------
+
+- name: Install or update AWS CLI v2
+  ansible.windows.win_package:
+    path: "{{ aws_cli_temp_dir }}\\AWSCLIV2.msi"
+    state: present
+    arguments: /qn
+  register: aws_cli_install
+
+
+# ---------------------------------------------------------
+# PATH
+# ---------------------------------------------------------
+
+- name: Add AWS CLI to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - "{{ aws_cli_install_dir }}"
+    scope: machine
+    state: present
+  register: aws_cli_path
+
+
+# ---------------------------------------------------------
+# Verify installation
+# ---------------------------------------------------------
+
+- name: Verify AWS CLI v2 installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $aws = 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
+
+      if (-not (Test-Path -LiteralPath $aws)) {
+        throw "AWS CLI executable was not found at $aws"
+      }
+
+      $versionOutput = & $aws --version 2>&1
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "AWS CLI verification failed with exit code $LASTEXITCODE"
+      }
+
+      if ($versionOutput -notmatch 'aws-cli/([0-9.]+)') {
+        throw "Unable to determine installed AWS CLI version from: $versionOutput"
+      }
+
+      $Ansible.Result = @{
+        version = $Matches[1]
+        output  = ($versionOutput -join "`n").Trim()
+      }
+  register: aws_cli_after
+
+- name: Display installed AWS CLI version
+  ansible.builtin.debug:
+    msg: "{{ aws_cli_after.result.output }}"
+
+
+# ---------------------------------------------------------
+# Check authentication state
+# ---------------------------------------------------------
+
+- name: Check whether AWS CLI authentication is configured
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $aws = 'C:\Program Files\Amazon\AWSCLIV2\aws.exe'
+
+      try {
+        $identity = & $aws sts get-caller-identity `
+          --output json 2>&1
+
+        if ($LASTEXITCODE -eq 0) {
+          $parsed = $identity | ConvertFrom-Json
+
+          $Ansible.Result = @{
+            authenticated = $true
+            account       = $parsed.Account
+            arn           = $parsed.Arn
+          }
+        }
+        else {
+          $Ansible.Result = @{
+            authenticated = $false
+            message       = ($identity -join "`n")
+          }
+        }
+      }
+      catch {
+        $Ansible.Result = @{
+          authenticated = $false
+          message       = $_.Exception.Message
+        }
+      }
+  register: aws_cli_authentication
+  failed_when: false
+  no_log: true
+
+- name: Display AWS authentication status
+  ansible.builtin.debug:
+    msg: >-
+      AWS CLI authentication configured:
+      {{ aws_cli_authentication.result.authenticated }}
+
+
+# ---------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------
+
+- name: Remove AWS CLI temporary installer directory
+  ansible.windows.win_file:
+    path: "{{ aws_cli_temp_dir }}"
+    state: absent

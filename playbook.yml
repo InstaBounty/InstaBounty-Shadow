@@ -4,22 +4,24 @@
   gather_facts: false
 
   roles:
-    - powershell
-    - windows_terminal
-    - sevenzip
-    - git
-    - github_cli
-    - vscode
-    - node
-    - node_tools
-    - python
-    - uv
-    - build_tools
-    - foundry
-    - solidity_tools
-    - java
-    - android
-    - postgresql
-    - nvidia
-    - ollama
-    - llm_models
+    # - powershell
+    # - windows_terminal
+    # - sevenzip
+    # - git
+    # - github_cli
+    # - vscode
+    # - node
+    # - node_tools
+    # - python
+    # - uv
+    # - build_tools
+    # - foundry
+    # - solidity_tools
+    # - java
+    # - android
+    # - postgresql
+    # - nvidia
+    # - ollama
+    # - llm_models
+    # - vscode_extensions
+    - aws_cli
