@@ -1,0 +1,132 @@
+---
+- name: Check whether solc is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $solc = 'C:\Program Files\Solidity\solc.exe'
+      $installed = Test-Path -LiteralPath $solc
+
+      if ($installed) {
+        $versionOutput = (& $solc --version) -join "`n"
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "solc version check failed with exit code $LASTEXITCODE"
+        }
+
+        if ($versionOutput -match 'Version:\s*([0-9]+\.[0-9]+\.[0-9]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine installed Solidity compiler version from: $versionOutput"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: solidity_version
+
+- name: Display current Solidity compiler version
+  ansible.builtin.debug:
+    msg: "Solidity compiler version: {{ solidity_version.result.version }}"
+
+- name: Find latest Solidity release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/argotorg/solidity/releases/latest
+    headers:
+      Accept: application/vnd.github+json
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: solidity_release
+
+- name: Select Windows Solidity compiler
+  ansible.builtin.set_fact:
+    solidity_target_version: >-
+      {{
+        solidity_release.json.tag_name
+        | regex_replace('^v', '')
+      }}
+    solidity_windows_urls: >-
+      {{
+        solidity_release.json.assets
+        | selectattr('name', 'match', '^solc-windows\.exe$')
+        | map(attribute='browser_download_url')
+        | list
+      }}
+
+- name: Validate Solidity compiler selection
+  ansible.builtin.assert:
+    that:
+      - solidity_windows_urls | length == 1
+    fail_msg: >-
+      The latest Solidity release did not contain exactly one
+      Windows compiler executable.
+
+- name: Display target Solidity compiler version
+  ansible.builtin.debug:
+    msg: "Latest Solidity compiler version: {{ solidity_target_version }}"
+
+- name: Create Solidity installation directory
+  ansible.windows.win_file:
+    path: C:\Program Files\Solidity
+    state: directory
+
+- name: Download or upgrade Solidity compiler
+  ansible.windows.win_get_url:
+    url: "{{ solidity_windows_urls | first }}"
+    dest: C:\Program Files\Solidity\solc.exe
+    force: true
+  when: >-
+    not solidity_version.result.installed or
+    (solidity_version.result.version | trim)
+      is version(solidity_target_version, '<', version_type='strict')
+
+- name: Add Solidity compiler to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - 'C:\Program Files\Solidity'
+    scope: machine
+    state: present
+
+- name: Verify Solidity compiler installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $solc = 'C:\Program Files\Solidity\solc.exe'
+
+      if (-not (Test-Path -LiteralPath $solc)) {
+        throw "Solidity compiler was not found at $solc"
+      }
+
+      $versionOutput = (& $solc --version) -join "`n"
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Solidity compiler verification failed"
+      }
+
+      if ($versionOutput -notmatch 'Version:\s*([0-9]+\.[0-9]+\.[0-9]+)') {
+        throw "Unable to determine installed Solidity version from: $versionOutput"
+      }
+
+      $Ansible.Result = $Matches[1]
+  register: solidity_version_after
+
+- name: Display installed Solidity compiler version
+  ansible.builtin.debug:
+    msg: "Solidity compiler installed: {{ solidity_version_after.result }}"
+
+- name: Validate installed Solidity compiler version
+  ansible.builtin.assert:
+    that:
+      - solidity_version_after.result | trim
+        is version(solidity_target_version, '>=', version_type='strict')
+    fail_msg: >-
+      Solidity {{ solidity_target_version }} was expected,
+      but {{ solidity_version_after.result }} is installed.
