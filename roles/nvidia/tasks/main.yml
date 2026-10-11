@@ -1,0 +1,204 @@
+---
+- name: Check whether NVIDIA GPU is present
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $gpus = Get-CimInstance Win32_VideoController |
+        Where-Object { $_.Name -match 'NVIDIA' }
+
+      if (-not $gpus) {
+        $Ansible.Result = @{
+          present = $false
+          devices = @()
+        }
+        return
+      }
+
+      $devices = @()
+
+      foreach ($gpu in $gpus) {
+        $devices += @{
+          name           = $gpu.Name
+          driver_version = $gpu.DriverVersion
+          status         = $gpu.Status
+        }
+      }
+
+      $Ansible.Result = @{
+        present = $true
+        devices = $devices
+      }
+  register: nvidia_gpu_status
+
+- name: Validate NVIDIA GPU is present
+  ansible.builtin.assert:
+    that:
+      - nvidia_gpu_status.result.present
+    fail_msg: >-
+      No NVIDIA GPU was detected on the Shadow developer machine.
+
+- name: Display detected NVIDIA GPU devices
+  ansible.builtin.debug:
+    var: nvidia_gpu_status.result.devices
+
+
+# ---------------------------------------------------------
+# Locate nvidia-smi
+# ---------------------------------------------------------
+
+- name: Locate nvidia-smi
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $candidates = @(
+        'C:\Windows\System32\nvidia-smi.exe',
+        'C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+      )
+
+      $found = $null
+
+      foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+          $found = $candidate
+          break
+        }
+      }
+
+      if (-not $found) {
+        $command = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+
+        if ($command) {
+          $found = $command.Source
+        }
+      }
+
+      $Ansible.Result = @{
+        found = ($null -ne $found)
+        path  = $found
+      }
+  register: nvidia_smi_status
+
+- name: Validate nvidia-smi is available
+  ansible.builtin.assert:
+    that:
+      - nvidia_smi_status.result.found
+    fail_msg: >-
+      An NVIDIA GPU was detected, but nvidia-smi.exe could not be found.
+      The NVIDIA driver installation may be incomplete.
+
+- name: Display nvidia-smi path
+  ansible.builtin.debug:
+    msg: "nvidia-smi: {{ nvidia_smi_status.result.path }}"
+
+
+# ---------------------------------------------------------
+# Query NVIDIA GPU
+# ---------------------------------------------------------
+
+- name: Query NVIDIA GPU details
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $nvidiaSmi = '{{ nvidia_smi_status.result.path }}'
+
+      $output = & $nvidiaSmi `
+        --query-gpu=name,driver_version,memory.total,memory.free,compute_cap `
+        --format=csv,noheader,nounits
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "nvidia-smi GPU query failed with exit code $LASTEXITCODE"
+      }
+
+      $devices = @()
+
+      foreach ($line in $output) {
+        $parts = $line -split ',' | ForEach-Object { $_.Trim() }
+
+        $devices += @{
+          name               = $parts[0]
+          driver_version     = $parts[1]
+          memory_total_mb    = $parts[2]
+          memory_free_mb     = $parts[3]
+          compute_capability = $parts[4]
+        }
+      }
+
+      $Ansible.Result = $devices
+  register: nvidia_gpu_details
+
+- name: Display NVIDIA GPU details
+  ansible.builtin.debug:
+    var: nvidia_gpu_details.result
+
+
+# ---------------------------------------------------------
+# Query CUDA compatibility
+# ---------------------------------------------------------
+
+- name: Query NVIDIA driver CUDA compatibility
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $nvidiaSmi = '{{ nvidia_smi_status.result.path }}'
+
+      $output = & $nvidiaSmi
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "nvidia-smi failed with exit code $LASTEXITCODE"
+      }
+
+      $text = $output -join "`n"
+
+      $driverVersion = $null
+      $cudaVersion = $null
+
+      if ($text -match 'Driver Version:\s*([0-9.]+)') {
+        $driverVersion = $Matches[1]
+      }
+
+      if ($text -match 'CUDA Version:\s*([0-9.]+)') {
+        $cudaVersion = $Matches[1]
+      }
+
+      $Ansible.Result = @{
+        driver_version = $driverVersion
+        cuda_version   = $cudaVersion
+      }
+  register: nvidia_cuda_status
+
+- name: Display NVIDIA driver and CUDA compatibility
+  ansible.builtin.debug:
+    msg:
+      - "NVIDIA driver: {{ nvidia_cuda_status.result.driver_version }}"
+      - "CUDA compatibility: {{ nvidia_cuda_status.result.cuda_version }}"
+
+
+# ---------------------------------------------------------
+# Verify GPU health
+# ---------------------------------------------------------
+
+- name: Verify NVIDIA GPU health
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $nvidiaSmi = '{{ nvidia_smi_status.result.path }}'
+
+      $output = & $nvidiaSmi `
+        --query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total `
+        --format=csv,noheader,nounits
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Unable to query NVIDIA GPU health"
+      }
+
+      $Ansible.Result = ($output -join "`n")
+  register: nvidia_health
+
+- name: Display NVIDIA GPU health
+  ansible.builtin.debug:
+    msg: "{{ nvidia_health.result }}"
