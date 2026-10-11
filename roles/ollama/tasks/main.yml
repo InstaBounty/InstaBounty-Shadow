@@ -1,0 +1,377 @@
+---
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
+- name: Define Ollama configuration
+  ansible.builtin.set_fact:
+    ollama_install_dir: 'C:\Program Files\Ollama'
+    ollama_executable: 'C:\Program Files\Ollama\ollama.exe'
+    ollama_api_url: 'http://127.0.0.1:11434'
+
+
+# ---------------------------------------------------------
+# Check current installation
+# ---------------------------------------------------------
+
+- name: Check whether Ollama is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $ollama = 'C:\Program Files\Ollama\ollama.exe'
+      $installed = Test-Path -LiteralPath $ollama
+
+      if ($installed) {
+        $versionOutput = & $ollama --version 2>&1
+
+        $Ansible.Result = @{
+          installed = $true
+          version   = ($versionOutput -join "`n").Trim()
+        }
+      }
+      else {
+        $Ansible.Result = @{
+          installed = $false
+          version   = 'Not installed'
+        }
+      }
+  register: ollama_status
+
+- name: Display current Ollama status
+  ansible.builtin.debug:
+    msg:
+      - "Ollama installed: {{ ollama_status.result.installed }}"
+      - "Ollama version: {{ ollama_status.result.version }}"
+
+
+# ---------------------------------------------------------
+# Install / upgrade Ollama
+# ---------------------------------------------------------
+
+- name: Install or upgrade Ollama
+  ansible.windows.win_powershell:
+    script: |
+      $env:OLLAMA_INSTALL_DIR = 'C:\Program Files\Ollama'
+
+      $installer = Invoke-RestMethod 'https://ollama.com/install.ps1'
+      Invoke-Expression $installer
+
+      if (-not (Test-Path -LiteralPath 'C:\Program Files\Ollama\ollama.exe')) {
+        throw "Ollama executable was not found after installation"
+      }
+  register: ollama_install
+
+
+# ---------------------------------------------------------
+# PATH
+# ---------------------------------------------------------
+
+- name: Add Ollama to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - "{{ ollama_install_dir }}"
+    scope: machine
+    state: present
+  register: ollama_path
+
+
+# ---------------------------------------------------------
+# Verify executable
+# ---------------------------------------------------------
+
+- name: Verify Ollama executable
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $ollama = 'C:\Program Files\Ollama\ollama.exe'
+
+      if (-not (Test-Path -LiteralPath $ollama)) {
+        throw "Ollama executable was not found at $ollama"
+      }
+
+      $versionOutput = & $ollama --version 2>&1
+
+      $Ansible.Result = ($versionOutput -join "`n").Trim()
+  register: ollama_version_after
+
+- name: Display installed Ollama version
+  ansible.builtin.debug:
+    msg: "{{ ollama_version_after.result }}"
+
+
+# ---------------------------------------------------------
+# GPU verification
+# ---------------------------------------------------------
+
+- name: Verify NVIDIA GPU is available
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+
+      if ($null -eq $nvidiaSmi) {
+        $Ansible.Result = @{
+          available = $false
+          message   = 'nvidia-smi was not found'
+        }
+
+        return
+      }
+
+      $output = & $nvidiaSmi.Source `
+        --query-gpu=name,driver_version,memory.total `
+        --format=csv,noheader
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "nvidia-smi failed"
+      }
+
+      $Ansible.Result = @{
+        available = $true
+        details   = ($output -join "`n")
+      }
+  register: ollama_gpu
+
+- name: Display GPU available to Ollama
+  ansible.builtin.debug:
+    msg:
+      - "NVIDIA GPU available: {{ ollama_gpu.result.available }}"
+      - "{{ ollama_gpu.result.details | default(ollama_gpu.result.message) }}"
+
+
+# ---------------------------------------------------------
+# Check whether Ollama API is already running
+# ---------------------------------------------------------
+
+- name: Check whether Ollama API is running
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      try {
+        $response = Invoke-RestMethod `
+          -Uri 'http://127.0.0.1:11434/api/version' `
+          -Method Get `
+          -TimeoutSec 5
+
+        $Ansible.Result = @{
+          running = $true
+          version = $response.version
+        }
+      }
+      catch {
+        $Ansible.Result = @{
+          running = $false
+          error   = $_.Exception.Message
+        }
+      }
+  register: ollama_api_status
+
+
+# ---------------------------------------------------------
+# Start Ollama server
+# ---------------------------------------------------------
+
+- name: Resolve existing Ollama model directory
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $models = $env:OLLAMA_MODELS
+      if ([string]::IsNullOrWhiteSpace($models)) {
+        $models = [Environment]::GetEnvironmentVariable('OLLAMA_MODELS', 'User')
+      }
+      if ([string]::IsNullOrWhiteSpace($models)) {
+        $models = [Environment]::GetEnvironmentVariable('OLLAMA_MODELS', 'Machine')
+      }
+      if ([string]::IsNullOrWhiteSpace($models)) {
+        $models = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.ollama\models'
+      }
+      if (-not [System.IO.Path]::IsPathRooted($models)) {
+        throw "OLLAMA_MODELS must be an absolute path for the background server"
+      }
+      $Ansible.Result = $models
+  register: ollama_model_directory
+
+- name: Ensure Ollama model directory exists
+  ansible.windows.win_file:
+    path: '{{ ollama_model_directory.result }}'
+    state: directory
+
+- name: Allow background Ollama server to access models
+  ansible.windows.win_acl:
+    path: '{{ ollama_model_directory.result }}'
+    user: 'NT AUTHORITY\SYSTEM'
+    rights: FullControl
+    type: allow
+    state: present
+    inherit: ContainerInherit, ObjectInherit
+    propagation: None
+
+- name: Create Ollama server log directory
+  ansible.windows.win_file:
+    path: 'C:\ProgramData\InstaBounty\Ollama'
+    state: directory
+
+- name: Write Ollama server startup script
+  ansible.windows.win_copy:
+    dest: 'C:\ProgramData\InstaBounty\Ollama\start-server.ps1'
+    content: |
+      $ErrorActionPreference = 'Stop'
+      $env:OLLAMA_HOST = '127.0.0.1:11434'
+      $env:OLLAMA_MODELS = '{{ ollama_model_directory.result | replace("'", "''") }}'
+      $process = Start-Process -FilePath '{{ ollama_executable }}' `
+        -ArgumentList 'serve' `
+        -WorkingDirectory '{{ ollama_install_dir }}' `
+        -RedirectStandardOutput 'C:\ProgramData\InstaBounty\Ollama\server.stdout.log' `
+        -RedirectStandardError 'C:\ProgramData\InstaBounty\Ollama\server.stderr.log' `
+        -NoNewWindow -Wait -PassThru
+      exit $process.ExitCode
+
+- name: Register persistent Ollama server task
+  community.windows.win_scheduled_task:
+    name: InstaBounty Ollama Server
+    description: Run the Ollama API independently of the SSH session
+    actions:
+      - path: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+        arguments: >-
+          -NoProfile -NonInteractive -ExecutionPolicy Bypass
+          -File "C:\ProgramData\InstaBounty\Ollama\start-server.ps1"
+        working_directory: '{{ ollama_install_dir }}'
+    triggers:
+      - type: boot
+    username: SYSTEM
+    logon_type: service_account
+    run_level: highest
+    execution_time_limit: PT0S
+    restart_count: 3
+    restart_interval: PT1M
+    multiple_instances: 2
+    start_when_available: true
+    disallow_start_if_on_batteries: false
+    stop_if_going_on_batteries: false
+    enabled: true
+    state: present
+
+- name: Start Ollama server
+  ansible.windows.win_powershell:
+    script: |
+      $task = Get-ScheduledTask -TaskName 'InstaBounty Ollama Server' -ErrorAction Stop
+
+      if ($task.State -eq 'Running') {
+        $Ansible.Changed = $false
+        return
+      }
+
+      Start-ScheduledTask -InputObject $task
+      $Ansible.Changed = $true
+  when: not ollama_api_status.result.running
+
+- name: Wait for Ollama API with startup diagnostics
+  block:
+    - name: Wait for Ollama API to become available
+      ansible.windows.win_uri:
+        url: "{{ ollama_api_url }}/api/version"
+        method: GET
+        status_code: 200
+        use_proxy: false
+      register: ollama_api_ready
+      retries: 30
+      delay: 2
+      until: ollama_api_ready.status_code | default(0, true) == 200
+  rescue:
+    - name: Read Ollama startup diagnostics
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          $task = Get-ScheduledTask -TaskName 'InstaBounty Ollama Server'
+          $info = Get-ScheduledTaskInfo -InputObject $task
+          $logs = foreach ($file in @('server.stdout.log', 'server.stderr.log')) {
+            $path = Join-Path 'C:\ProgramData\InstaBounty\Ollama' $file
+            if (Test-Path -LiteralPath $path) {
+              "${file}:"
+              Get-Content -LiteralPath $path -Tail 30
+            }
+          }
+          $Ansible.Result = @{
+            state = [string]$task.State
+            last_task_result = $info.LastTaskResult
+            logs = ($logs -join "`n")
+          }
+      register: ollama_startup_diagnostics
+
+    - name: Report Ollama startup failure
+      ansible.builtin.fail:
+        msg: >-
+          Ollama API did not become available at {{ ollama_api_url }}.
+          Task state: {{ ollama_startup_diagnostics.result.state }};
+          last result: {{ ollama_startup_diagnostics.result.last_task_result }}.
+          {{ ollama_startup_diagnostics.result.logs }}
+
+
+# ---------------------------------------------------------
+# Final API verification
+# ---------------------------------------------------------
+
+- name: Query Ollama API version
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $response = Invoke-RestMethod `
+        -Uri 'http://127.0.0.1:11434/api/version' `
+        -Method Get `
+        -TimeoutSec 10
+
+      if (-not $response.version) {
+        throw "Ollama API responded but did not return a version"
+      }
+
+      $Ansible.Result = @{
+        running = $true
+        version = $response.version
+      }
+  register: ollama_api_after
+
+- name: Display Ollama server status
+  ansible.builtin.debug:
+    msg:
+      - "Ollama server running: {{ ollama_api_after.result.running }}"
+      - "Ollama API version: {{ ollama_api_after.result.version }}"
+      - "Ollama API: {{ ollama_api_url }}"
+
+
+# ---------------------------------------------------------
+# Check installed models
+# ---------------------------------------------------------
+
+- name: Query installed Ollama models
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $response = Invoke-RestMethod `
+        -Uri 'http://127.0.0.1:11434/api/tags' `
+        -Method Get `
+        -TimeoutSec 10
+
+      $models = @()
+
+      if ($response.models) {
+        $models = $response.models |
+          ForEach-Object { $_.name }
+      }
+
+      $Ansible.Result = @{
+        count  = $models.Count
+        models = $models
+      }
+  register: ollama_models
+
+- name: Display installed Ollama models
+  ansible.builtin.debug:
+    msg:
+      - "Installed model count: {{ ollama_models.result.count }}"
+      - "Models: {{ ollama_models.result.models }}"
