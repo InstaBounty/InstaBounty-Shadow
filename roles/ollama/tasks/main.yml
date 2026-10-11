@@ -368,10 +368,10 @@
         count  = $models.Count
         models = $models
       }
-  register: ollama_models
+  register: ollama_model_inventory
 
 - name: Display installed Ollama models
   ansible.builtin.debug:
     msg:
-      - "Installed model count: {{ ollama_models.result.count }}"
-      - "Models: {{ ollama_models.result.models }}"
+      - "Installed model count: {{ ollama_model_inventory.result.count }}"
+      - "Models: {{ ollama_model_inventory.result.models }}"

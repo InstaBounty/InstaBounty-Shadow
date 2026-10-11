@@ -1,28 +1,41 @@
 ---
-- name: Verify InstaBounty Shadow workstation
+- name: Configure InstaBounty Shadow development workstation
   hosts: shadow
   gather_facts: false
 
+  vars:
+    perform_final_reboot: true
+
   roles:
-    # - powershell
-    # - windows_terminal
-    # - sevenzip
-    # - git
-    # - github_cli
-    # - vscode
-    # - node
-    # - node_tools
-    # - python
-    # - uv
-    # - build_tools
-    # - foundry
-    # - solidity_tools
-    # - java
-    # - android
-    # - postgresql
-    # - nvidia
-    # - ollama
-    # - llm_models
-    # - aws_cli
-    # - terraform
+    - powershell
+    - windows_terminal
+    - sevenzip
+    - git
+    - github_cli
+    - vscode
+    - node
+    - node_tools
+    - python
+    - uv
+    - build_tools
+    - foundry
+    - solidity_tools
+    - java
+    - android
+    - postgresql
+    - nvidia
+    - ollama
+    - llm_models
+    - aws_cli
+    - terraform
     - vscode_extensions
+
+  post_tasks:
+    - name: Reboot workstation after provisioning
+      ansible.windows.win_reboot:
+        msg: Rebooting after InstaBounty workstation provisioning
+        reboot_timeout: 900
+        connect_timeout: 10
+        post_reboot_delay: 30
+        test_command: 'Write-Output "ready"'
+      when: perform_final_reboot | bool

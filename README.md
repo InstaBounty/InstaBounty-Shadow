@@ -1,33 +1,28 @@
-# InstaBounty-Shadow
+# InstaBounty Shadow
 
-Infrastructure and workstation configuration for InstaBounty development machines running on Shadow PC.
+Infrastructure-as-code configuration for building the Windows development workstation used for the InstaBounty project.
 
-The goal of this repository is to make a Shadow development workstation reproducible. A fresh Windows Shadow machine should require only a small bootstrap process before Ansible can configure the rest of the environment automatically.
+The goal of this repository is to make a new Shadow development machine reproducible with as little manual configuration as possible.
+
+The workstation itself runs Windows, while Ansible is executed from WSL on the local development machine.
 
 ## Architecture
 
-The development environment is managed from a local Windows machine using WSL2 and Ansible.
-
 ```text
-Windows Development PC
+Local Windows PC
 │
-├── Visual Studio Code
+├── WSL2 / Ubuntu
+│   ├── Git
+│   └── Ansible
 │
-└── WSL2 Ubuntu
-    │
-    ├── Git
-    ├── Ansible
-    ├── SSH
-    └── InstaBounty-Shadow
-          │
-          │ SSH over Tailscale
-          ▼
-    Shadow Windows PC
+└── Tailscale
+        │
+        ▼
+Shadow Windows workstation
+    └── OpenSSH Server
 ```
 
-Tailscale provides the private network connection between the local development machine and the Shadow PC.
-
-Ansible connects to the Shadow PC using Windows OpenSSH and executes Windows configuration through PowerShell.
+Ansible connects to the Shadow machine over SSH through Tailscale.
 
 ## Repository Structure
 
@@ -38,352 +33,354 @@ InstaBounty-Shadow/
 ├── inventory.yml
 ├── playbook.yml
 ├── requirements.yml
-│
-└── host_vars/
-    ├── shadow.example.yml
-    └── shadow.yml
+├── host_vars/
+│   ├── shadow.yml
+│   └── shadow.example.yml
+└── roles/
 ```
 
-`shadow.yml` contains machine-specific configuration and is excluded from Git.
+`host_vars/shadow.yml` contains machine-specific or sensitive configuration and must not be committed.
 
-`shadow.example.yml` provides a template for creating the local configuration.
+## Software Installed
 
-## Prerequisites
+The Ansible configuration installs and configures the main InstaBounty development toolchain.
 
-### Local machine
+### Windows tooling
 
-The Ansible controller runs inside Ubuntu on WSL2.
-
-Required software:
-
-- Windows Subsystem for Linux 2
-- Ubuntu
-- Git
-- Ansible
+- PowerShell 7
+- Windows Terminal
+- 7-Zip
+- Git for Windows
+- GitHub CLI
 - Visual Studio Code
-- Visual Studio Code WSL extension
-- Tailscale
 
-### Shadow machine
+### Web development
 
-The Shadow Windows machine requires:
+- Node.js LTS
+- Corepack
+- pnpm
 
-- Tailscale
-- Windows OpenSSH Server
+Project-specific packages such as Next.js, React, TypeScript, React Native and Expo are installed within their individual projects rather than globally.
+
+### Python
+
+- Python 3.13
+- uv
+
+Python project dependencies should normally be managed using `uv`.
+
+### Native build tooling
+
+- Visual Studio Build Tools
+- C/C++ build tools
+
+### Smart contract development
+
+- Foundry
+  - Forge
+  - Cast
+  - Anvil
+  - Chisel
+- Solidity compiler
+
+Hardhat is installed on a project-by-project basis rather than globally.
+
+### Android development
+
+- Eclipse Temurin JDK 21
+- Android SDK
+- Android platform tools
+- adb
+- Android build tools
+- Android Studio
+
+Local Android emulation is not required for the current workflow. Android applications can be built locally and tested on physical devices or services such as AWS Device Farm.
+
+### Database
+
+- PostgreSQL
+
+### AI development
+
+- NVIDIA GPU/driver verification
+- Ollama
+- Local LLM models
+- Embedding model
+
+The initial model configuration includes models for:
+
+- coding
+- general-purpose AI workloads
+- semantic embeddings
+
+### AWS and infrastructure
+
+- AWS CLI v2
+- Terraform
+
+AWS resources used by InstaBounty can therefore be provisioned through Terraform rather than being created manually.
+
+### Visual Studio Code Extensions
+
+The workstation also installs the VS Code extensions used by the project, including support for:
+
 - PowerShell
-- SSH public-key authentication
+- YAML
+- Ansible
+- Git
+- Python
+- Pylance
+- Ruff
+- ESLint
+- Prettier
+- Tailwind CSS
+- Solidity
+- REST APIs
+- Terraform
+- AWS
 
-These are currently considered bootstrap dependencies because Ansible cannot configure the machine until remote connectivity exists.
+## Ansible Requirements
 
-## Clone the Repository
-
-From Ubuntu in WSL:
-
-```bash
-git clone git@github.com:<github-user>/InstaBounty-Shadow.git
-cd InstaBounty-Shadow
-```
-
-The repository can also be opened directly in Visual Studio Code:
-
-```bash
-code .
-```
-
-VS Code should show:
-
-```text
-WSL: Ubuntu
-```
-
-in the bottom-left corner.
-
-## Install Ansible
-
-Install the required Python tooling:
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-pip pipx
-```
-
-Add `pipx` applications to the shell path:
-
-```bash
-pipx ensurepath
-exec $SHELL
-```
-
-Install Ansible:
-
-```bash
-pipx install --include-deps ansible
-```
-
-Verify the installation:
-
-```bash
-ansible --version
-```
-
-## Install Ansible Collections
-
-Required collections are defined in:
-
-```text
-requirements.yml
-```
-
-Install them with:
+Install the required Ansible collections:
 
 ```bash
 ansible-galaxy collection install -r requirements.yml
 ```
 
-Current requirements:
+The project currently uses:
 
 ```yaml
----
 collections:
   - name: ansible.windows
+
+  - name: community.windows
 ```
-
-## SSH Key
-
-A dedicated SSH key is used for managing the Shadow machine.
-
-Create it from WSL:
-
-```bash
-ssh-keygen -t ed25519 \
-  -f ~/.ssh/instabounty_shadow \
-  -C "InstaBounty Shadow"
-```
-
-This creates:
-
-```text
-~/.ssh/instabounty_shadow
-~/.ssh/instabounty_shadow.pub
-```
-
-The private key must remain on the Ansible controller.
-
-Display the public key with:
-
-```bash
-cat ~/.ssh/instabounty_shadow.pub
-```
-
-The public key must be added to the Shadow Windows OpenSSH configuration.
-
-Test SSH before using Ansible:
-
-```bash
-ssh -i ~/.ssh/instabounty_shadow shadow@<TAILSCALE_IP>
-```
-
-The connection should succeed without requesting the Windows account password.
 
 ## Machine Configuration
 
-Machine-specific values are stored in:
+Create:
 
 ```text
 host_vars/shadow.yml
 ```
 
-This file is excluded from Git.
-
-Create it from the example:
-
-```bash
-cp host_vars/shadow.example.yml host_vars/shadow.yml
-```
-
-Then edit it:
-
-```yaml
----
-ansible_host: YOUR_TAILSCALE_IP
-ansible_user: YOUR_WINDOWS_USERNAME
-```
-
-For example:
-
-```yaml
----
-ansible_host: 100.x.x.x
-ansible_user: shadow
-```
-
-Do not commit `host_vars/shadow.yml`.
-
-The committed example file should remain:
+using:
 
 ```text
 host_vars/shadow.example.yml
 ```
 
-## Inventory
+as a template.
 
-The committed `inventory.yml` defines how Ansible connects to the Shadow host:
+Example:
 
 ```yaml
 ---
-all:
-  hosts:
-    shadow:
-      ansible_connection: ssh
-      ansible_shell_type: powershell
-      ansible_ssh_private_key_file: ~/.ssh/instabounty_shadow
+ansible_host: YOUR_TAILSCALE_IP
+ansible_user: shadow
+
+postgresql_superuser_password: "YOUR_PASSWORD"
 ```
 
-Ansible automatically loads the values from:
+Do not commit `host_vars/shadow.yml`.
+
+## SSH
+
+Ansible authenticates to the Shadow machine using a dedicated SSH key.
+
+The inventory references the private key:
+
+```yaml
+ansible_ssh_private_key_file: ~/.ssh/instabounty_shadow
+```
+
+The corresponding public key must be installed on the Shadow Windows machine.
+
+## Test Connectivity
+
+Before provisioning the machine:
+
+```bash
+ansible all -i inventory.yml -m ansible.windows.win_ping
+```
+
+A successful connection should return:
 
 ```text
-host_vars/shadow.yml
+pong
 ```
 
-for the `shadow` host.
+## Provision the Workstation
 
-## Test Ansible Connectivity
-
-The initial playbook verifies that Ansible can communicate with Windows:
-
-```yaml
----
-- name: Verify InstaBounty Shadow workstation
-  hosts: shadow
-  gather_facts: false
-
-  tasks:
-    - name: Test Windows connectivity
-      ansible.windows.win_ping:
-```
-
-Run it with:
+Run:
 
 ```bash
 ansible-playbook -i inventory.yml playbook.yml
 ```
 
-A successful result should look similar to:
+The machine performs a final reboot after provisioning.
 
-```text
-TASK [Test Windows connectivity]
-ok: [shadow]
+To run the playbook without the final reboot:
 
-PLAY RECAP
-shadow : ok=1 changed=0 unreachable=0 failed=0
+```bash
+ansible-playbook -i inventory.yml playbook.yml \
+  -e perform_final_reboot=false
 ```
 
-`win_ping` is not a normal ICMP ping. It verifies that Ansible can connect to Windows and successfully execute an Ansible Windows module.
+Ansible reconnects to the Shadow workstation after reboots performed during provisioning.
 
-## Network
+## Manual Configuration After Installation
 
-The Shadow machine is accessed over Tailscale rather than its public internet address.
+Most workstation configuration is automated, but credentials and account authentication are deliberately kept outside the repository.
 
-```text
-Local Windows PC
-       │
-       │ Tailscale
-       ▼
-100.x.x.x private network
-       │
-       │ SSH :22
-       ▼
-Shadow Windows PC
+### GitHub CLI
+
+Authenticate GitHub CLI:
+
+```powershell
+gh auth login
 ```
 
-Using Tailscale avoids exposing the Windows SSH service directly to the public internet.
+Verify:
 
-## Current Bootstrap Process
+```powershell
+gh auth status
+```
 
-A fresh Shadow machine currently requires the following manual bootstrap steps:
+GitHub credentials must not be stored in this repository.
 
-1. Install and connect Tailscale.
-2. Install Windows OpenSSH Server.
-3. Start and enable the `sshd` service.
-4. Configure the Windows Firewall for OpenSSH.
-5. Add the Ansible controller's SSH public key.
-6. Verify SSH connectivity.
-7. Run the Ansible playbook.
+### AWS Authentication
 
-The long-term goal is to reduce these steps to a small reusable PowerShell bootstrap script.
+The AWS CLI is installed automatically, but AWS authentication must be configured separately.
 
-## Project Goal
+IAM Identity Center / SSO is preferred over permanent AWS access keys.
 
-The eventual objective is for Ansible to configure the complete InstaBounty development workstation, including:
+Configure an SSO profile:
 
-- Windows base configuration
-- Remote desktop software
-- Git
-- Visual Studio Code
-- Python
-- Node.js
-- Docker
-- development tools
-- environment configuration
-- source repositories
-- InstaBounty-specific development dependencies
+```powershell
+aws configure sso
+```
 
-A fresh Shadow machine should ultimately require only:
+Login:
+
+```powershell
+aws sso login
+```
+
+Verify the active identity:
+
+```powershell
+aws sts get-caller-identity
+```
+
+Terraform can use the same AWS profile/session.
+
+AWS access keys must never be committed to this repository or placed directly inside Terraform files.
+
+### Terraform
+
+Verify Terraform:
+
+```powershell
+terraform version
+```
+
+Terraform infrastructure configuration belongs in the appropriate InstaBounty infrastructure repository rather than this workstation configuration repository.
+
+### Ollama
+
+Verify Ollama:
+
+```powershell
+ollama --version
+```
+
+List installed models:
+
+```powershell
+ollama list
+```
+
+The Ollama API is normally available at:
 
 ```text
-Bootstrap connectivity
-        ↓
-Run Ansible
-        ↓
-Development workstation ready
+http://127.0.0.1:11434
 ```
+
+### PostgreSQL
+
+PostgreSQL credentials are supplied through the ignored Ansible host configuration.
+
+The PostgreSQL superuser password must therefore remain in:
+
+```text
+host_vars/shadow.yml
+```
+
+and must never be committed.
+
+## Networking
+
+The Shadow machine is accessed through Tailscale because direct inbound connectivity to the Shadow public IP is not relied upon.
+
+Both the Ansible control machine and Shadow workstation must be connected to the same Tailscale network.
+
+The following Windows services should start automatically:
+
+- OpenSSH Server
+- Tailscale
+
+This allows Ansible to reconnect after Windows reboots.
+
+## Docker
+
+Docker Desktop is intentionally not installed.
+
+The Shadow environment does not expose the nested virtualization capability required for Docker Desktop / WSL2 virtualisation.
+
+The InstaBounty development stack therefore runs natively on Windows where possible.
+
+Examples:
+
+- Next.js → Node.js / pnpm
+- Python → Python / uv
+- Ethereum → Foundry / Anvil
+- PostgreSQL → native Windows PostgreSQL
+- AI models → Ollama
+- Android → JDK / Android SDK
+
+A remote Linux Docker host can be introduced later if containerized workloads become necessary.
 
 ## Security
 
 Do not commit:
 
 - SSH private keys
-- passwords
+- AWS credentials
+- PostgreSQL passwords
+- API keys
 - authentication tokens
-- Tailscale credentials
 - machine-specific secrets
-- `host_vars/shadow.yml`
 
-The SSH private key remains in:
+Secrets and credentials should remain outside the repository.
+
+## Development Philosophy
+
+The repository configures the development machine.
+
+Individual application repositories are responsible for their own project dependencies and versions.
+
+This keeps the workstation reproducible while allowing each InstaBounty component to pin the exact versions it requires.
+
+The intended separation is:
 
 ```text
-~/.ssh/instabounty_shadow
+Ansible
+    → developer workstation configuration
+
+Terraform
+    → AWS infrastructure
+
+Application repositories
+    → application dependencies and source code
 ```
-
-Machine-specific Ansible configuration remains in:
-
-```text
-host_vars/shadow.yml
-```
-
-Both should stay outside source control.
-
-
-01  PowerShell 7
-02  Windows Terminal
-03  7-Zip
-04  Git
-05  GitHub CLI
-06  VS Code
-07  VS Code extensions
-08  Node.js LTS
-09  Corepack + pnpm
-10  Python 3.13
-11  uv
-12  Visual Studio Build Tools
-13  Docker Desktop
-14  Foundry
-15  Solidity tooling
-16  JDK
-17  Android Studio
-18  Android SDK / adb / emulator
-19  NVIDIA driver verification
-20  Ollama
-21  LLM models
-22  Embedding models
-23  Open WebUI
