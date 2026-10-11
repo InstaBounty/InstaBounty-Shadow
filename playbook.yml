@@ -15,4 +15,3 @@
     - python
     - uv
     - build_tools
-    - docker
