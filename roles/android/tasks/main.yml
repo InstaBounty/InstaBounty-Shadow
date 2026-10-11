@@ -1,0 +1,427 @@
+---
+- name: Define Android paths
+  ansible.builtin.set_fact:
+    android_studio_dir: 'C:\Program Files\Android\Android Studio'
+    android_sdk_dir: 'C:\Android\Sdk'
+    android_temp_dir: 'C:\Temp\InstaBounty\Android'
+
+    android_studio_url: >-
+      https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.2.1.8/android-studio-rabbit1-windows.zip
+
+    android_cmdline_tools_url: >-
+      https://dl.google.com/android/repository/commandlinetools-win-15859902_latest.zip
+
+    android_platform: 'android-36'
+    android_build_tools: '36.0.0'
+    android_system_image: 'system-images;android-36;google_apis_playstore;x86_64'
+    android_avd_name: 'InstaBounty_API_36'
+
+
+# ---------------------------------------------------------
+# Android Studio
+# ---------------------------------------------------------
+
+- name: Check whether Android Studio is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $studio = 'C:\Program Files\Android\Android Studio\bin\studio64.exe'
+      $installed = Test-Path -LiteralPath $studio
+
+      $Ansible.Result = @{
+        installed = $installed
+        path      = $studio
+      }
+  register: android_studio_status
+
+- name: Display Android Studio status
+  ansible.builtin.debug:
+    msg: >-
+      Android Studio installed:
+      {{ android_studio_status.result.installed }}
+
+- name: Create Android temporary directory
+  ansible.windows.win_file:
+    path: "{{ android_temp_dir }}"
+    state: directory
+
+- name: Download Android Studio
+  ansible.windows.win_get_url:
+    url: "{{ android_studio_url }}"
+    dest: "{{ android_temp_dir }}\\android-studio.zip"
+  when: not android_studio_status.result.installed
+
+- name: Create Android Program Files directory
+  ansible.windows.win_file:
+    path: 'C:\Program Files\Android'
+    state: directory
+
+- name: Extract Android Studio
+  community.windows.win_unzip:
+    src: "{{ android_temp_dir }}\\android-studio.zip"
+    dest: 'C:\Program Files\Android'
+  when: not android_studio_status.result.installed
+
+- name: Rename Android Studio directory
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $source = 'C:\Program Files\Android\android-studio'
+      $target = 'C:\Program Files\Android\Android Studio'
+
+      if (Test-Path -LiteralPath $target) {
+        return
+      }
+
+      if (-not (Test-Path -LiteralPath $source)) {
+        throw "Extracted Android Studio directory was not found at $source"
+      }
+
+      Move-Item -LiteralPath $source -Destination $target
+
+      $Ansible.Changed = $true
+  when: not android_studio_status.result.installed
+
+
+# ---------------------------------------------------------
+# Android SDK
+# ---------------------------------------------------------
+
+- name: Create Android SDK directory
+  ansible.windows.win_file:
+    path: "{{ android_sdk_dir }}"
+    state: directory
+
+- name: Check whether Android command-line tools are installed
+  ansible.windows.win_stat:
+    path: "{{ android_sdk_dir }}\\cmdline-tools\\latest\\bin\\sdkmanager.bat"
+  register: android_cmdline_tools_status
+
+- name: Download Android command-line tools
+  ansible.windows.win_get_url:
+    url: "{{ android_cmdline_tools_url }}"
+    dest: "{{ android_temp_dir }}\\commandlinetools.zip"
+  when: not android_cmdline_tools_status.stat.exists
+
+- name: Create command-line tools extraction directory
+  ansible.windows.win_file:
+    path: "{{ android_temp_dir }}\\cmdline-tools"
+    state: directory
+  when: not android_cmdline_tools_status.stat.exists
+
+- name: Extract Android command-line tools
+  community.windows.win_unzip:
+    src: "{{ android_temp_dir }}\\commandlinetools.zip"
+    dest: "{{ android_temp_dir }}\\cmdline-tools"
+  when: not android_cmdline_tools_status.stat.exists
+
+- name: Create Android command-line tools parent directory
+  ansible.windows.win_file:
+    path: "{{ android_sdk_dir }}\\cmdline-tools"
+    state: directory
+
+- name: Install Android command-line tools
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $source = '{{ android_temp_dir }}\cmdline-tools\cmdline-tools'
+      $target = '{{ android_sdk_dir }}\cmdline-tools\latest'
+
+      if (Test-Path -LiteralPath $target) {
+        return
+      }
+
+      if (-not (Test-Path -LiteralPath $source)) {
+        throw "Extracted Android command-line tools were not found at $source"
+      }
+
+      Move-Item -LiteralPath $source -Destination $target
+
+      $Ansible.Changed = $true
+  when: not android_cmdline_tools_status.stat.exists
+
+
+# ---------------------------------------------------------
+# Environment
+# ---------------------------------------------------------
+
+- name: Set ANDROID_HOME
+  ansible.windows.win_environment:
+    state: present
+    name: ANDROID_HOME
+    value: "{{ android_sdk_dir }}"
+    level: machine
+
+- name: Set ANDROID_SDK_ROOT
+  ansible.windows.win_environment:
+    state: present
+    name: ANDROID_SDK_ROOT
+    value: "{{ android_sdk_dir }}"
+    level: machine
+
+- name: Add Android tools to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - "{{ android_sdk_dir }}\\platform-tools"
+      - "{{ android_sdk_dir }}\\emulator"
+      - "{{ android_sdk_dir }}\\cmdline-tools\\latest\\bin"
+      - "{{ android_studio_dir }}\\bin"
+    scope: machine
+    state: present
+
+
+# ---------------------------------------------------------
+# Licences
+# ---------------------------------------------------------
+
+- name: Resolve Java runtime for Android tools
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $candidates = @(
+        [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
+        [Environment]::GetEnvironmentVariable('JAVA_HOME', 'User')
+        $env:JAVA_HOME
+        '{{ android_studio_dir }}\jbr'
+      )
+
+      foreach ($javaHome in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($javaHome)) {
+          continue
+        }
+
+        if (Test-Path -LiteralPath (Join-Path $javaHome 'bin\java.exe')) {
+          $Ansible.Result = $javaHome
+          return
+        }
+      }
+
+      throw "No Java runtime was found through JAVA_HOME or Android Studio's bundled runtime. Run the java role first."
+  register: android_java_home
+
+- name: Accept Android SDK licences
+  ansible.windows.win_powershell:
+    script: |
+      # Refresh Java and SDK settings in this WinRM process.
+      $env:JAVA_HOME = '{{ android_java_home.result }}'
+      $env:Path = (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:Path
+      $env:ANDROID_HOME = '{{ android_sdk_dir }}'
+      $env:ANDROID_SDK_ROOT = '{{ android_sdk_dir }}'
+
+      $sdkmanager = '{{ android_sdk_dir }}\cmdline-tools\latest\bin\sdkmanager.bat'
+
+      if (-not (Test-Path -LiteralPath $sdkmanager)) {
+        throw "sdkmanager was not found at $sdkmanager"
+      }
+
+      1..100 | ForEach-Object { 'y' } | & $sdkmanager --licenses
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Android SDK licence acceptance failed with exit code $LASTEXITCODE"
+      }
+
+      $Ansible.Changed = $false
+
+
+# ---------------------------------------------------------
+# SDK packages
+# ---------------------------------------------------------
+
+- name: Install Android SDK packages
+  ansible.windows.win_powershell:
+    script: |
+      # Refresh Java and SDK settings in this WinRM process.
+      $env:JAVA_HOME = '{{ android_java_home.result }}'
+      $env:Path = (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:Path
+      $env:ANDROID_HOME = '{{ android_sdk_dir }}'
+      $env:ANDROID_SDK_ROOT = '{{ android_sdk_dir }}'
+
+      $sdkmanager = '{{ android_sdk_dir }}\cmdline-tools\latest\bin\sdkmanager.bat'
+
+      $packages = @(
+        'platform-tools',
+        'emulator',
+        'platforms;{{ android_platform }}',
+        'build-tools;{{ android_build_tools }}',
+        '{{ android_system_image }}'
+      )
+
+      & $sdkmanager --install $packages
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Android SDK package installation failed with exit code $LASTEXITCODE"
+      }
+
+
+# ---------------------------------------------------------
+# Verify SDK
+# ---------------------------------------------------------
+
+- name: Verify ADB
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $adb = '{{ android_sdk_dir }}\platform-tools\adb.exe'
+
+      if (-not (Test-Path -LiteralPath $adb)) {
+        throw "adb.exe was not found at $adb"
+      }
+
+      $version = & $adb version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "adb verification failed"
+      }
+
+      $Ansible.Result = ($version | Select-Object -First 1)
+  register: android_adb_version
+
+- name: Display ADB version
+  ansible.builtin.debug:
+    msg: "{{ android_adb_version.result }}"
+
+
+# ---------------------------------------------------------
+# Android Emulator
+# ---------------------------------------------------------
+
+- name: Verify Android Emulator installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $emulator = '{{ android_sdk_dir }}\emulator\emulator.exe'
+
+      if (-not (Test-Path -LiteralPath $emulator)) {
+        throw "Android Emulator was not found at $emulator"
+      }
+
+      $version = & $emulator -version 2>&1
+
+      $Ansible.Result = ($version | Select-Object -First 1)
+  register: android_emulator_version
+
+- name: Display Android Emulator version
+  ansible.builtin.debug:
+    msg: "{{ android_emulator_version.result }}"
+
+
+# ---------------------------------------------------------
+# AVD
+# ---------------------------------------------------------
+
+- name: Check whether InstaBounty Android virtual device exists
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      # Refresh Java and SDK settings in this WinRM process.
+      $env:JAVA_HOME = '{{ android_java_home.result }}'
+      $env:Path = (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:Path
+      $env:ANDROID_HOME = '{{ android_sdk_dir }}'
+      $env:ANDROID_SDK_ROOT = '{{ android_sdk_dir }}'
+
+      $avdmanager = '{{ android_sdk_dir }}\cmdline-tools\latest\bin\avdmanager.bat'
+
+      $output = (& $avdmanager list avd) -join "`n"
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Android virtual device listing failed with exit code $LASTEXITCODE"
+      }
+
+      $exists = $output -match 'Name:\s+{{ android_avd_name }}'
+
+      $Ansible.Result = @{
+        exists = $exists
+      }
+  register: android_avd_status
+
+- name: Create InstaBounty Android virtual device
+  ansible.windows.win_powershell:
+    script: |
+      # Refresh Java and SDK settings in this WinRM process.
+      $env:JAVA_HOME = '{{ android_java_home.result }}'
+      $env:Path = (Join-Path $env:JAVA_HOME 'bin') + ';' + $env:Path
+      $env:ANDROID_HOME = '{{ android_sdk_dir }}'
+      $env:ANDROID_SDK_ROOT = '{{ android_sdk_dir }}'
+
+      $avdmanager = '{{ android_sdk_dir }}\cmdline-tools\latest\bin\avdmanager.bat'
+
+      'no' | & $avdmanager create avd `
+        --name '{{ android_avd_name }}' `
+        --package '{{ android_system_image }}' `
+        --force
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Android virtual device creation failed with exit code $LASTEXITCODE"
+      }
+  when: not android_avd_status.result.exists
+
+
+# ---------------------------------------------------------
+# Emulator acceleration check
+# ---------------------------------------------------------
+
+- name: Check Android Emulator acceleration
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $emulator = '{{ android_sdk_dir }}\emulator\emulator.exe'
+
+      $output = & $emulator -accel-check 2>&1
+      $exitCode = $LASTEXITCODE
+
+      $Ansible.Result = @{
+        available = ($exitCode -eq 0)
+        exit_code = $exitCode
+        output    = ($output -join "`n")
+      }
+  register: android_emulator_acceleration
+  failed_when: false
+
+- name: Display Android Emulator acceleration status
+  ansible.builtin.debug:
+    msg:
+      - "Hardware acceleration available: {{ android_emulator_acceleration.result.available }}"
+      - "{{ android_emulator_acceleration.result.output }}"
+
+
+# ---------------------------------------------------------
+# Final verification
+# ---------------------------------------------------------
+
+- name: Verify Android Studio installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $studio = '{{ android_studio_dir }}\bin\studio64.exe'
+
+      if (-not (Test-Path -LiteralPath $studio)) {
+        throw "Android Studio was not found at $studio"
+      }
+
+      $Ansible.Result = @{
+        studio = $studio
+        sdk    = '{{ android_sdk_dir }}'
+        avd    = '{{ android_avd_name }}'
+      }
+  register: android_after
+
+- name: Display Android development environment
+  ansible.builtin.debug:
+    msg:
+      - "Android Studio: {{ android_after.result.studio }}"
+      - "Android SDK: {{ android_after.result.sdk }}"
+      - "Android AVD: {{ android_after.result.avd }}"
+
+- name: Remove temporary Android files
+  ansible.windows.win_file:
+    path: "{{ android_temp_dir }}"
+    state: absent
