@@ -1,0 +1,216 @@
+---
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
+- name: Define Terraform configuration
+  ansible.builtin.set_fact:
+    terraform_install_dir: 'C:\Program Files\Terraform'
+    terraform_temp_dir: 'C:\Temp\InstaBounty\Terraform'
+
+
+# ---------------------------------------------------------
+# Check existing installation
+# ---------------------------------------------------------
+
+- name: Check whether Terraform is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $terraform = 'C:\Program Files\Terraform\terraform.exe'
+      $installed = Test-Path -LiteralPath $terraform
+
+      if ($installed) {
+        $versionOutput = & $terraform version
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "Terraform version check failed with exit code $LASTEXITCODE"
+        }
+
+        $versionLine = $versionOutput | Select-Object -First 1
+
+        if ($versionLine -match 'Terraform v([0-9.]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine installed Terraform version from: $versionLine"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: terraform_status
+
+- name: Display current Terraform status
+  ansible.builtin.debug:
+    msg:
+      - "Terraform installed: {{ terraform_status.result.installed }}"
+      - "Terraform version: {{ terraform_status.result.version }}"
+
+
+# ---------------------------------------------------------
+# Find latest stable Terraform release
+# ---------------------------------------------------------
+
+- name: Get Terraform release index
+  ansible.builtin.uri:
+    url: https://releases.hashicorp.com/terraform/index.json
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: terraform_release_index
+
+- name: Select latest stable Terraform version
+  ansible.builtin.set_fact:
+    terraform_stable_versions: >-
+      {{
+        (terraform_release_index.content | from_json).versions.keys()
+        | select('match', '^[0-9]+[.][0-9]+[.][0-9]+$')
+        | list
+      }}
+
+- name: Validate Terraform stable release selection
+  ansible.builtin.assert:
+    that:
+      - terraform_stable_versions | length > 0
+    fail_msg: The Terraform release index did not contain any stable versions.
+
+- name: Determine latest stable Terraform version
+  ansible.builtin.set_fact:
+    terraform_target_version: >-
+      {{
+        terraform_stable_versions
+        | map('split', '.')
+        | map('map', 'int')
+        | map('list')
+        | sort
+        | last
+        | join('.')
+      }}
+
+- name: Build Terraform Windows download URL
+  ansible.builtin.set_fact:
+    terraform_download_url: >-
+      https://releases.hashicorp.com/terraform/{{ terraform_target_version }}/terraform_{{ terraform_target_version }}_windows_amd64.zip
+
+- name: Display target Terraform version
+  ansible.builtin.debug:
+    msg: "Latest stable Terraform version: {{ terraform_target_version }}"
+
+
+# ---------------------------------------------------------
+# Download / install
+# ---------------------------------------------------------
+
+- name: Create Terraform temporary directory
+  ansible.windows.win_file:
+    path: "{{ terraform_temp_dir }}"
+    state: directory
+  when: >-
+    not terraform_status.result.installed or
+    (terraform_status.result.version | trim)
+      is version(terraform_target_version, '<')
+
+- name: Download Terraform
+  ansible.windows.win_get_url:
+    url: "{{ terraform_download_url }}"
+    dest: "{{ terraform_temp_dir }}\\terraform.zip"
+  when: >-
+    not terraform_status.result.installed or
+    (terraform_status.result.version | trim)
+      is version(terraform_target_version, '<')
+
+- name: Create Terraform installation directory
+  ansible.windows.win_file:
+    path: "{{ terraform_install_dir }}"
+    state: directory
+
+- name: Extract Terraform
+  community.windows.win_unzip:
+    src: "{{ terraform_temp_dir }}\\terraform.zip"
+    dest: "{{ terraform_install_dir }}"
+    delete_archive: false
+  when: >-
+    not terraform_status.result.installed or
+    (terraform_status.result.version | trim)
+      is version(terraform_target_version, '<')
+
+
+# ---------------------------------------------------------
+# PATH
+# ---------------------------------------------------------
+
+- name: Add Terraform to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - "{{ terraform_install_dir }}"
+    scope: machine
+    state: present
+  register: terraform_path
+
+
+# ---------------------------------------------------------
+# Verification
+# ---------------------------------------------------------
+
+- name: Verify Terraform installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $terraform = 'C:\Program Files\Terraform\terraform.exe'
+
+      if (-not (Test-Path -LiteralPath $terraform)) {
+        throw "terraform.exe was not found at $terraform"
+      }
+
+      $versionOutput = & $terraform version
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Terraform verification failed"
+      }
+
+      $versionLine = $versionOutput | Select-Object -First 1
+
+      if ($versionLine -notmatch 'Terraform v([0-9.]+)') {
+        throw "Unable to determine Terraform version from: $versionLine"
+      }
+
+      $Ansible.Result = @{
+        version = $Matches[1]
+        output  = ($versionOutput -join "`n").Trim()
+      }
+  register: terraform_after
+
+- name: Display installed Terraform version
+  ansible.builtin.debug:
+    msg: "{{ terraform_after.result.output }}"
+
+- name: Validate Terraform version
+  ansible.builtin.assert:
+    that:
+      - terraform_after.result.version | trim
+        is version(terraform_target_version, '>=')
+    fail_msg: >-
+      Terraform {{ terraform_target_version }} was expected,
+      but {{ terraform_after.result.version }} is installed.
+
+
+# ---------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------
+
+- name: Remove Terraform temporary files
+  ansible.windows.win_file:
+    path: "{{ terraform_temp_dir }}"
+    state: absent
+  when: >-
+    not terraform_status.result.installed or
+    (terraform_status.result.version | trim)
+      is version(terraform_target_version, '<')

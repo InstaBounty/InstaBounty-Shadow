@@ -24,4 +24,5 @@
     # - ollama
     # - llm_models
     # - vscode_extensions
-    - aws_cli
+    # - aws_cli
+    - terraform
