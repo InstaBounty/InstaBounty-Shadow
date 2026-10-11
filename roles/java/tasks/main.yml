@@ -1,0 +1,226 @@
+---
+- name: Check whether Java 21 is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $jdk = Get-ChildItem -LiteralPath 'C:\Program Files\Eclipse Adoptium' -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+          $_.Name -match '^jdk-21(?:[.]|$|[-+])' -and
+          (Test-Path -LiteralPath (Join-Path $_.FullName 'bin\java.exe')) -and
+          (Test-Path -LiteralPath (Join-Path $_.FullName 'bin\javac.exe'))
+        } |
+        Sort-Object -Property @{
+          Expression = {
+            if ($_.Name -match '^jdk-(21(?:[.][0-9]+){1,3})') {
+              [version]$Matches[1]
+            } else {
+              [version]'21.0'
+            }
+          }
+          Descending = $true
+        } |
+        Select-Object -First 1
+
+      $installed = $null -ne $jdk
+      $javaHome = ''
+
+      if ($installed) {
+        $javaHome = $jdk.FullName
+        $java = Join-Path $javaHome 'bin\java.exe'
+        $versionOutput = & $java -version 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "Java version check failed with exit code $LASTEXITCODE"
+        }
+
+        $versionLine = $versionOutput | Select-Object -First 1
+
+        if ($versionLine -match '"([0-9.]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine installed Java version from: $versionLine"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+        java_home = $javaHome
+      }
+  register: java_version
+
+- name: Display current Java version
+  ansible.builtin.debug:
+    msg:
+      - "Java installed: {{ java_version.result.installed }}"
+      - "Java version: {{ java_version.result.version }}"
+
+- name: Find latest Temurin 21 Windows x64 JDK release
+  ansible.builtin.uri:
+    url: https://api.adoptium.net/v3/assets/latest/21/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: java_release
+
+- name: Find Temurin 21 MSI candidates
+  ansible.builtin.set_fact:
+    java_msi_releases: >-
+      {{
+        java_release.json
+        | selectattr('binary.installer', 'defined')
+        | selectattr('binary.installer', 'ne', none)
+        | selectattr('binary.installer.name', 'search', '[.]msi$')
+        | list
+      }}
+
+- name: Validate Temurin 21 MSI selection
+  ansible.builtin.assert:
+    that:
+      - java_msi_releases | length == 1
+    fail_msg: >-
+      The Adoptium API did not return exactly one Temurin 21
+      Windows x64 JDK MSI installer.
+
+- name: Select latest Temurin 21 MSI
+  ansible.builtin.set_fact:
+    java_target_version: >-
+      {{
+        (java_msi_releases | first).version.semver
+        | regex_replace('[+].*$', '')
+      }}
+    java_msi_url: >-
+      {{
+        (java_msi_releases | first).binary.installer.link
+      }}
+
+- name: Display target Java version
+  ansible.builtin.debug:
+    msg: "Latest Temurin 21 version: {{ java_target_version }}"
+
+- name: Create temporary Java installer directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\Java
+    state: directory
+  when: >-
+    not java_version.result.installed or
+    (java_version.result.version | trim)
+      is version(java_target_version, '<')
+
+- name: Download Temurin 21 MSI
+  ansible.windows.win_get_url:
+    url: "{{ java_msi_url }}"
+    dest: C:\Temp\InstaBounty\Java\temurin21.msi
+  when: >-
+    not java_version.result.installed or
+    (java_version.result.version | trim)
+      is version(java_target_version, '<')
+
+- name: Install or upgrade Temurin JDK 21
+  ansible.windows.win_package:
+    path: C:\Temp\InstaBounty\Java\temurin21.msi
+    state: present
+    arguments: >-
+      ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJarFileRunWith,FeatureJavaHome
+  register: java_install
+  when: >-
+    not java_version.result.installed or
+    (java_version.result.version | trim)
+      is version(java_target_version, '<')
+
+- name: Verify Java installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $jdk = Get-ChildItem -LiteralPath 'C:\Program Files\Eclipse Adoptium' -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+          $_.Name -match '^jdk-21(?:[.]|$|[-+])' -and
+          (Test-Path -LiteralPath (Join-Path $_.FullName 'bin\java.exe')) -and
+          (Test-Path -LiteralPath (Join-Path $_.FullName 'bin\javac.exe'))
+        } |
+        Sort-Object -Property @{
+          Expression = {
+            if ($_.Name -match '^jdk-(21(?:[.][0-9]+){1,3})') {
+              [version]$Matches[1]
+            } else {
+              [version]'21.0'
+            }
+          }
+          Descending = $true
+        } |
+        Select-Object -First 1
+
+      if ($null -eq $jdk) {
+        throw "No Temurin 21 JDK with java.exe and javac.exe was found under C:\Program Files\Eclipse Adoptium"
+      }
+
+      $javaHome = $jdk.FullName
+      $java = Join-Path $javaHome 'bin\java.exe'
+      $javac = Join-Path $javaHome 'bin\javac.exe'
+
+      if (-not (Test-Path -LiteralPath $java)) {
+        throw "java.exe was not found at $java"
+      }
+
+      if (-not (Test-Path -LiteralPath $javac)) {
+        throw "javac.exe was not found at $javac"
+      }
+
+      $versionOutput = & $java -version 2>&1
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Java verification failed with exit code $LASTEXITCODE"
+      }
+
+      $compilerOutput = & $javac -version 2>&1
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Java compiler verification failed with exit code $LASTEXITCODE"
+      }
+
+      $versionLine = $versionOutput | Select-Object -First 1
+
+      if ($versionLine -notmatch '"([0-9.]+)') {
+        throw "Unable to determine installed Java version"
+      }
+
+      $Ansible.Result = @{
+        java_version  = $Matches[1]
+        javac_version = ($compilerOutput | Select-Object -First 1)
+        java_home     = $javaHome
+      }
+  register: java_after
+
+- name: Set JAVA_HOME
+  ansible.windows.win_environment:
+    state: present
+    name: JAVA_HOME
+    value: "{{ java_after.result.java_home }}"
+    level: machine
+
+- name: Add Java to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - '%JAVA_HOME%\bin'
+    scope: machine
+    state: present
+  register: java_path
+
+- name: Display installed Java details
+  ansible.builtin.debug:
+    msg:
+      - "Java installed: {{ java_after.result.java_version }}"
+      - "{{ java_after.result.javac_version }}"
+      - "JAVA_HOME: {{ java_after.result.java_home }}"
+
+- name: Remove temporary Java installer directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\Java
+    state: absent
+  when: java_install.changed | default(false)
