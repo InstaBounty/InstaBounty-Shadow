@@ -1,0 +1,142 @@
+---
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
+- name: Define Ollama executable
+  ansible.builtin.set_fact:
+    ollama_executable: 'C:\Program Files\Ollama\ollama.exe'
+    ollama_api_url: 'http://127.0.0.1:11434'
+
+
+# ---------------------------------------------------------
+# Verify Ollama
+# ---------------------------------------------------------
+
+- name: Verify Ollama executable exists
+  ansible.windows.win_stat:
+    path: "{{ ollama_executable }}"
+  register: ollama_executable_status
+
+- name: Validate Ollama installation
+  ansible.builtin.assert:
+    that:
+      - ollama_executable_status.stat.exists
+    fail_msg: >-
+      Ollama is not installed. Run the ollama role before the
+      llm_models role.
+
+
+# ---------------------------------------------------------
+# Verify API
+# ---------------------------------------------------------
+
+- name: Verify Ollama API is available
+  ansible.windows.win_uri:
+    url: "{{ ollama_api_url }}/api/version"
+    method: GET
+    status_code: 200
+  register: ollama_api_status
+  retries: 10
+  delay: 2
+  until: ollama_api_status.status_code == 200
+
+
+# ---------------------------------------------------------
+# Read currently installed models
+# ---------------------------------------------------------
+
+- name: Get currently installed Ollama models
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $response = Invoke-RestMethod `
+        -Uri 'http://127.0.0.1:11434/api/tags' `
+        -Method Get `
+        -TimeoutSec 10
+
+      $models = @()
+
+      if ($response.models) {
+        $models = @($response.models |
+          ForEach-Object { $_.name })
+      }
+
+      $Ansible.Result = $models
+  register: ollama_installed_models
+
+- name: Display currently installed Ollama models
+  ansible.builtin.debug:
+    msg: "Installed models: {{ ollama_installed_models.result }}"
+
+
+# ---------------------------------------------------------
+# Pull models
+# ---------------------------------------------------------
+
+- name: Pull required Ollama models
+  ansible.windows.win_powershell:
+    script: |
+      $model = '{{ item }}'
+      $ollama = 'C:\Program Files\Ollama\ollama.exe'
+
+      & $ollama pull $model
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Failed to pull Ollama model $model"
+      }
+
+      $Ansible.Changed = $true
+  loop: "{{ ollama_models }}"
+  when: >-
+    (item if ':' in item.split('/')[-1] else item ~ ':latest')
+    not in ollama_installed_models.result
+
+
+# ---------------------------------------------------------
+# Refresh installed models
+# ---------------------------------------------------------
+
+- name: Get installed Ollama models after pull
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $response = Invoke-RestMethod `
+        -Uri 'http://127.0.0.1:11434/api/tags' `
+        -Method Get `
+        -TimeoutSec 10
+
+      $models = @()
+
+      if ($response.models) {
+        $models = @($response.models |
+          ForEach-Object { $_.name })
+      }
+
+      $Ansible.Result = $models
+  register: ollama_models_after
+
+
+# ---------------------------------------------------------
+# Validate models
+# ---------------------------------------------------------
+
+- name: Validate required Ollama models are installed
+  ansible.builtin.assert:
+    that:
+      - >-
+        (item if ':' in item.split('/')[-1] else item ~ ':latest')
+        in ollama_models_after.result
+    fail_msg: "Ollama model {{ item }} was not installed successfully."
+  loop: "{{ ollama_models }}"
+
+
+# ---------------------------------------------------------
+# Display final model list
+# ---------------------------------------------------------
+
+- name: Display installed Ollama models
+  ansible.builtin.debug:
+    msg: "{{ ollama_models_after.result }}"
