@@ -1,0 +1,200 @@
+---
+- name: Check whether Foundry is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $forge = 'C:\Program Files\Foundry\forge.exe'
+      $installed = Test-Path -LiteralPath $forge
+
+      if ($installed) {
+        $versionOutput = (& $forge --version) -join "`n"
+
+        if ($LASTEXITCODE -ne 0) {
+          throw "Forge version check failed with exit code $LASTEXITCODE"
+        }
+
+        if ($versionOutput -match 'forge Version:\s*([0-9]+\.[0-9]+\.[0-9]+)') {
+          $version = $Matches[1]
+        }
+        elseif ($versionOutput -match 'forge ([0-9]+\.[0-9]+\.[0-9]+)') {
+          $version = $Matches[1]
+        }
+        else {
+          throw "Unable to determine installed Foundry version from: $versionOutput"
+        }
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+      }
+  register: foundry_version
+
+- name: Display current Foundry version
+  ansible.builtin.debug:
+    msg: "Foundry version: {{ foundry_version.result.version }}"
+
+- name: Find latest stable Foundry release
+  ansible.builtin.uri:
+    url: https://api.github.com/repos/foundry-rs/foundry/releases/latest
+    headers:
+      Accept: application/vnd.github+json
+    return_content: true
+  delegate_to: localhost
+  become: false
+  register: foundry_release
+
+- name: Select official Windows x64 Foundry archive
+  ansible.builtin.set_fact:
+    foundry_target_version: >-
+      {{
+        foundry_release.json.tag_name
+        | regex_replace('^v', '')
+      }}
+    foundry_archive_urls: >-
+      {{
+        foundry_release.json.assets
+        | selectattr(
+            'name',
+            'match',
+            '^foundry_v.*_win32_amd64[.]zip$'
+          )
+        | map(attribute='browser_download_url')
+        | list
+      }}
+
+- name: Validate Foundry archive selection
+  ansible.builtin.assert:
+    that:
+      - foundry_archive_urls | length == 1
+    fail_msg: >-
+      The latest Foundry release did not contain exactly one
+      Windows x64 archive.
+
+- name: Display target Foundry version
+  ansible.builtin.debug:
+    msg: "Latest stable Foundry version: {{ foundry_target_version }}"
+
+- name: Create temporary Foundry directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\Foundry
+    state: directory
+  when: >-
+    not foundry_version.result.installed or
+    (foundry_version.result.version | trim)
+      is version(foundry_target_version, '<', version_type='strict')
+
+- name: Download Foundry Windows archive
+  ansible.windows.win_get_url:
+    url: "{{ foundry_archive_urls | first }}"
+    dest: C:\Temp\InstaBounty\Foundry\foundry.zip
+  when: >-
+    not foundry_version.result.installed or
+    (foundry_version.result.version | trim)
+      is version(foundry_target_version, '<', version_type='strict')
+
+- name: Create Foundry installation directory
+  ansible.windows.win_file:
+    path: C:\Program Files\Foundry
+    state: directory
+
+- name: Extract Foundry
+  community.windows.win_unzip:
+    src: C:\Temp\InstaBounty\Foundry\foundry.zip
+    dest: C:\Program Files\Foundry
+    delete_archive: false
+  when: >-
+    not foundry_version.result.installed or
+    (foundry_version.result.version | trim)
+      is version(foundry_target_version, '<', version_type='strict')
+
+- name: Add Foundry to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - 'C:\Program Files\Foundry'
+    scope: machine
+    state: present
+  register: foundry_path
+
+- name: Verify Foundry executables
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $required = @(
+        'forge.exe',
+        'cast.exe',
+        'anvil.exe',
+        'chisel.exe'
+      )
+
+      $missing = @()
+
+      foreach ($exe in $required) {
+        $path = Join-Path 'C:\Program Files\Foundry' $exe
+
+        if (-not (Test-Path -LiteralPath $path)) {
+          $missing += $exe
+        }
+      }
+
+      if ($missing.Count -gt 0) {
+        throw "Missing Foundry executables: $($missing -join ', ')"
+      }
+
+      $forge = 'C:\Program Files\Foundry\forge.exe'
+      $versionOutput = (& $forge --version) -join "`n"
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Forge verification failed with exit code $LASTEXITCODE"
+      }
+
+      if ($versionOutput -match 'forge Version:\s*([0-9]+\.[0-9]+\.[0-9]+)') {
+        $version = $Matches[1]
+      }
+      elseif ($versionOutput -match 'forge ([0-9]+\.[0-9]+\.[0-9]+)') {
+        $version = $Matches[1]
+      }
+      else {
+        throw "Unable to determine installed Foundry version from: $versionOutput"
+      }
+
+      $Ansible.Result = @{
+        version = $version
+        forge   = 'C:\Program Files\Foundry\forge.exe'
+        cast    = 'C:\Program Files\Foundry\cast.exe'
+        anvil   = 'C:\Program Files\Foundry\anvil.exe'
+        chisel  = 'C:\Program Files\Foundry\chisel.exe'
+      }
+  register: foundry_after
+
+- name: Display installed Foundry tools
+  ansible.builtin.debug:
+    msg:
+      - "Foundry installed: {{ foundry_after.result.version }}"
+      - "forge: {{ foundry_after.result.forge }}"
+      - "cast: {{ foundry_after.result.cast }}"
+      - "anvil: {{ foundry_after.result.anvil }}"
+      - "chisel: {{ foundry_after.result.chisel }}"
+
+- name: Validate installed Foundry version
+  ansible.builtin.assert:
+    that:
+      - foundry_after.result.version | trim
+        is version(foundry_target_version, '>=', version_type='strict')
+    fail_msg: >-
+      Foundry {{ foundry_target_version }} was expected,
+      but {{ foundry_after.result.version }} is installed.
+
+- name: Remove temporary Foundry directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\Foundry
+    state: absent
+  when: >-
+    not foundry_version.result.installed or
+    (foundry_version.result.version | trim)
+      is version(foundry_target_version, '<', version_type='strict')
