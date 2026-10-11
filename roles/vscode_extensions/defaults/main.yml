@@ -1,0 +1,19 @@
+vscode_extensions:
+  - ms-vscode.powershell
+  - redhat.vscode-yaml
+  - redhat.ansible
+  - eamodio.gitlens
+
+  - ms-python.python
+  - ms-python.vscode-pylance
+  - charliermarsh.ruff
+
+  - dbaeumer.vscode-eslint
+  - esbenp.prettier-vscode
+  - bradlc.vscode-tailwindcss
+
+  - JuanBlanco.solidity
+  - humao.rest-client
+
+  - hashicorp.terraform
+  - amazonwebservices.aws-toolkit-vscode

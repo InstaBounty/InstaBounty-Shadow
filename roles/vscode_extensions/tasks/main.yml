@@ -1,0 +1,127 @@
+---
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
+- name: Define Visual Studio Code executable
+  ansible.builtin.set_fact:
+    vscode_code_command: 'C:\Program Files\Microsoft VS Code\bin\code.cmd'
+
+
+# ---------------------------------------------------------
+# Verify VS Code
+# ---------------------------------------------------------
+
+- name: Verify Visual Studio Code command exists
+  ansible.windows.win_stat:
+    path: "{{ vscode_code_command }}"
+  register: vscode_command_status
+
+- name: Validate Visual Studio Code installation
+  ansible.builtin.assert:
+    that:
+      - vscode_command_status.stat.exists
+    fail_msg: >-
+      Visual Studio Code command was not found at
+      {{ vscode_code_command }}.
+      Run the vscode role before vscode_extensions.
+
+
+# ---------------------------------------------------------
+# Get current extensions
+# ---------------------------------------------------------
+
+- name: Get currently installed Visual Studio Code extensions
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $code = 'C:\Program Files\Microsoft VS Code\bin\code.cmd'
+
+      $extensions = & $code --list-extensions
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Unable to list Visual Studio Code extensions"
+      }
+
+      $Ansible.Result = @(
+        $extensions |
+          ForEach-Object { $_.Trim().ToLowerInvariant() } |
+          Where-Object { $_ }
+      )
+  register: vscode_installed_extensions
+
+- name: Display currently installed Visual Studio Code extensions
+  ansible.builtin.debug:
+    var: vscode_installed_extensions.result
+
+
+# ---------------------------------------------------------
+# Install extensions
+# ---------------------------------------------------------
+
+- name: Install required Visual Studio Code extensions
+  ansible.windows.win_powershell:
+    script: |
+      $code = 'C:\Program Files\Microsoft VS Code\bin\code.cmd'
+      $extension = '{{ item }}'
+
+      & $code `
+        --install-extension $extension `
+        --force
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install Visual Studio Code extension $extension"
+      }
+
+      $Ansible.Changed = $true
+  loop: "{{ vscode_extensions }}"
+  when: item | lower not in vscode_installed_extensions.result
+
+
+# ---------------------------------------------------------
+# Read extensions again
+# ---------------------------------------------------------
+
+- name: Get Visual Studio Code extensions after installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $code = 'C:\Program Files\Microsoft VS Code\bin\code.cmd'
+
+      $extensions = & $code --list-extensions
+
+      if ($LASTEXITCODE -ne 0) {
+        throw "Unable to list Visual Studio Code extensions"
+      }
+
+      $Ansible.Result = @(
+        $extensions |
+          ForEach-Object { $_.Trim().ToLowerInvariant() } |
+          Where-Object { $_ }
+      )
+  register: vscode_extensions_after
+
+
+# ---------------------------------------------------------
+# Validate
+# ---------------------------------------------------------
+
+- name: Validate required Visual Studio Code extensions
+  ansible.builtin.assert:
+    that:
+      - item | lower in vscode_extensions_after.result
+    fail_msg: >-
+      Visual Studio Code extension {{ item }}
+      was not installed successfully.
+  loop: "{{ vscode_extensions }}"
+
+
+# ---------------------------------------------------------
+# Final status
+# ---------------------------------------------------------
+
+- name: Display installed Visual Studio Code extensions
+  ansible.builtin.debug:
+    msg: "{{ vscode_extensions_after.result }}"

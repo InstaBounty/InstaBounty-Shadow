@@ -23,6 +23,6 @@
     # - nvidia
     # - ollama
     # - llm_models
-    # - vscode_extensions
     # - aws_cli
-    - terraform
+    # - terraform
+    - vscode_extensions
