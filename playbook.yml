@@ -13,7 +13,9 @@
     - git
     - github_cli
     - vscode
-    - postman
+    - role: postman
+      tags:
+        - postman
     - node
     - node_tools
     - python
