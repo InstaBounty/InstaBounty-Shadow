@@ -13,6 +13,7 @@
     - git
     - github_cli
     - vscode
+    - postman
     - node
     - node_tools
     - python
