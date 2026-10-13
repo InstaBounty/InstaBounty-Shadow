@@ -30,9 +30,50 @@ function Read-RequiredValue {
     }
 }
 
+function Read-SshPublicKey {
+    while ($true) {
+        Write-Host ''
+        Write-Host 'Paste the public key used by the Ansible control machine.'
+        Write-Host 'Example: ssh-ed25519 AAAAC3... instabounty-shadow'
+        $key = Read-Host 'SSH public key'
+        $key = $key.Trim()
+
+        if ($key -match '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)\s+[A-Za-z0-9+/]+={0,3}(\s+.*)?$') {
+            return $key
+        }
+
+        Write-Warning 'That does not look like a valid OpenSSH public key. Paste the complete contents of the .pub file.'
+    }
+}
+
 function Test-CommandExists {
     param([string]$Name)
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Add-AuthorizedKey {
+    param(
+        [string]$AuthorizedKeysPath,
+        [string]$PublicKey
+    )
+
+    $directory = Split-Path -Parent $AuthorizedKeysPath
+    if (-not (Test-Path $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+
+    $existingKeys = @()
+    if (Test-Path $AuthorizedKeysPath) {
+        $existingKeys = @(Get-Content -Path $AuthorizedKeysPath -ErrorAction Stop)
+    }
+
+    if ($existingKeys -contains $PublicKey) {
+        Write-Host 'SSH public key is already present.'
+        return
+    }
+
+    Add-Content -Path $AuthorizedKeysPath -Value $PublicKey -Encoding ascii
+    Write-Host "SSH public key added to $AuthorizedKeysPath"
 }
 
 Write-Host 'InstaBounty Shadow Bootstrap' -ForegroundColor Green
@@ -44,6 +85,7 @@ $defaultUser = ($currentIdentity -split '\\')[-1]
 
 Write-Step 'Collecting configuration'
 $windowsUser = Read-RequiredValue -Prompt 'Windows username Ansible should use' -DefaultValue $defaultUser
+$sshPublicKey = Read-SshPublicKey
 $installTailscale = Read-Host 'Install Tailscale automatically? [Y/n]'
 if ([string]::IsNullOrWhiteSpace($installTailscale)) { $installTailscale = 'Y' }
 
@@ -92,6 +134,63 @@ New-ItemProperty `
     -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
     -PropertyType String `
     -Force | Out-Null
+
+Write-Step 'Installing the Ansible SSH public key'
+$localUser = Get-LocalUser -Name $windowsUser -ErrorAction SilentlyContinue
+if (-not $localUser) {
+    throw "Windows user '$windowsUser' does not exist on this machine."
+}
+
+$administratorsGroup = Get-LocalGroup -SID 'S-1-5-32-544'
+$isAdministrator = $false
+try {
+    $isAdministrator = @(Get-LocalGroupMember -Group $administratorsGroup.Name -ErrorAction Stop | Where-Object {
+        $_.SID -eq $localUser.SID
+    }).Count -gt 0
+}
+catch {
+    Write-Warning "Could not determine whether '$windowsUser' belongs to the local Administrators group. Falling back to the per-user authorized_keys file."
+}
+
+if ($isAdministrator) {
+    $authorizedKeysPath = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+    Add-AuthorizedKey -AuthorizedKeysPath $authorizedKeysPath -PublicKey $sshPublicKey
+
+    & icacls $authorizedKeysPath /inheritance:r | Out-Null
+    & icacls $authorizedKeysPath /grant '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to set permissions on administrators_authorized_keys.'
+    }
+
+    Write-Host 'Configured the OpenSSH administrator authorized-keys file.'
+}
+else {
+    $profile = Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $localUser.SID.Value } | Select-Object -First 1
+    if ($profile -and $profile.LocalPath) {
+        $userProfilePath = $profile.LocalPath
+    }
+    else {
+        $userProfilePath = Join-Path $env:SystemDrive "Users\$windowsUser"
+    }
+
+    $sshDirectory = Join-Path $userProfilePath '.ssh'
+    $authorizedKeysPath = Join-Path $sshDirectory 'authorized_keys'
+    Add-AuthorizedKey -AuthorizedKeysPath $authorizedKeysPath -PublicKey $sshPublicKey
+
+    & icacls $sshDirectory /inheritance:r | Out-Null
+    & icacls $sshDirectory /grant:r "${windowsUser}:(OI)(CI)F" '*S-1-5-18:F' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to set permissions on the user .ssh directory.'
+    }
+
+    & icacls $authorizedKeysPath /inheritance:r | Out-Null
+    & icacls $authorizedKeysPath /grant:r "${windowsUser}:F" '*S-1-5-18:F' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to set permissions on authorized_keys.'
+    }
+
+    Write-Host "Configured the authorized-keys file for '$windowsUser'."
+}
 
 Restart-Service sshd
 
@@ -158,8 +257,9 @@ if ($tailscaleIp) {
 else {
     Write-Host 'Tailscale IP : not available yet'
 }
-Write-Host 'SSH service  : Running'
-Write-Host 'SSH port     : 22'
+Write-Host "Authorized key: $authorizedKeysPath"
+Write-Host 'SSH service   : Running'
+Write-Host 'SSH port      : 22'
 
 Write-Host "`nUse these values on the Ansible control machine in host_vars/shadow.yml:"
 Write-Host '---'
@@ -175,6 +275,6 @@ Write-Host 'postgresql_superuser_password: "YOUR_STRONG_PASSWORD_HERE"'
 
 Write-Host "`nNext steps:" -ForegroundColor Yellow
 Write-Host '1. Ensure the local/control PC is signed into the same Tailscale network.'
-Write-Host '2. Install the Ansible SSH public key for this Windows user.'
-Write-Host '3. Create host_vars/shadow.yml on the control machine.'
-Write-Host '4. Test SSH and Ansible connectivity before running the full playbook.'
+Write-Host '2. Create host_vars/shadow.yml on the control machine.'
+Write-Host '3. Test direct SSH connectivity using the matching private key.'
+Write-Host '4. Test Ansible connectivity before running the full playbook.'
