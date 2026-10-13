@@ -1,0 +1,75 @@
+---
+- name: Check whether Postman is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $postman = Join-Path $env:LOCALAPPDATA 'Postman\Postman.exe'
+      $installed = Test-Path -LiteralPath $postman
+
+      if ($installed) {
+        $version = (Get-Item -LiteralPath $postman).VersionInfo.ProductVersion
+      }
+      else {
+        $version = 'Not installed'
+      }
+
+      $Ansible.Result = @{
+        installed = $installed
+        version   = $version
+        path      = $postman
+      }
+  register: postman_status
+
+- name: Display current Postman version
+  ansible.builtin.debug:
+    msg: >-
+      Postman version:
+      {{ postman_status.result.version }}
+
+- name: Create temporary Postman directory
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty
+    state: directory
+  when: not postman_status.result.installed
+
+- name: Download latest Postman Windows x64 installer
+  ansible.windows.win_get_url:
+    url: https://dl.pstmn.io/download/latest/win64
+    dest: C:\Temp\InstaBounty\PostmanSetup.exe
+  when: not postman_status.result.installed
+
+- name: Install Postman silently
+  ansible.windows.win_command: >-
+    C:\Temp\InstaBounty\PostmanSetup.exe --silent
+  register: postman_install
+  when: not postman_status.result.installed
+
+- name: Verify Postman installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $postman = Join-Path $env:LOCALAPPDATA 'Postman\Postman.exe'
+
+      if (-not (Test-Path -LiteralPath $postman)) {
+        throw "Postman executable was not found at $postman after installation"
+      }
+
+      $Ansible.Result = @{
+        path    = $postman
+        version = (Get-Item -LiteralPath $postman).VersionInfo.ProductVersion
+      }
+  register: postman_status_after
+
+- name: Display installed Postman version
+  ansible.builtin.debug:
+    msg: >-
+      Postman installed:
+      {{ postman_status_after.result.version }}
+
+- name: Remove Postman installer
+  ansible.windows.win_file:
+    path: C:\Temp\InstaBounty\PostmanSetup.exe
+    state: absent
+  when: postman_install.changed | default(false)
