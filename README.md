@@ -232,6 +232,16 @@ ansible-playbook -i inventory.yml playbook.yml \
 
 Ansible reconnects to the Shadow workstation after reboots performed during provisioning.
 
+### Install only Postman
+
+The Postman role is tagged, so it can be run independently without provisioning the full workstation:
+
+```bash
+ansible-playbook -i inventory.yml playbook.yml --tags postman
+```
+
+Because the final reboot task is not tagged `postman`, this command only runs the Postman role and does not reboot the workstation afterward.
+
 ## Manual Configuration After Installation
 
 Most workstation configuration is automated, but credentials and account authentication are deliberately kept outside the repository.
