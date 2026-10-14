@@ -33,6 +33,8 @@ InstaBounty-Shadow/
 ├── inventory.yml
 ├── playbook.yml
 ├── requirements.yml
+├── scripts/
+│   └── setup-shadow.ps1
 ├── host_vars/
 │   ├── shadow.yml
 │   └── shadow.example.yml
@@ -40,6 +42,57 @@ InstaBounty-Shadow/
 ```
 
 `host_vars/shadow.yml` contains machine-specific or sensitive configuration and must not be committed.
+
+## Clean Shadow VM Bootstrap
+
+A newly reset Shadow VM needs a small amount of configuration before Ansible can connect to it. The bootstrap script automates the Windows-side prerequisites instead of requiring the OpenSSH, firewall and Tailscale steps to be performed manually.
+
+The bootstrap deliberately remains separate from Ansible: its job is only to make a clean Windows VM reachable by the Ansible control machine.
+
+### Run the bootstrap
+
+On the Shadow VM, obtain this repository (or copy `scripts/setup-shadow.ps1` onto the VM), then open **Windows PowerShell as Administrator**.
+
+From the repository root run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\setup-shadow.ps1
+```
+
+The execution-policy change applies only to the current PowerShell process.
+
+The script prompts for the Windows username Ansible should use and whether Tailscale should be installed automatically.
+
+It then:
+
+- checks and installs Windows OpenSSH Server if required
+- enables and starts `sshd`
+- configures the inbound TCP/22 firewall rule
+- sets Windows PowerShell as the default OpenSSH shell
+- installs Tailscale with `winget` when requested
+- starts Tailscale and initiates authentication
+- verifies that SSH is running and TCP/22 is listening
+- detects the Tailscale IPv4 address when available
+- prints the values required for `host_vars/shadow.yml`
+
+The script is intended to be safe to rerun: existing OpenSSH, firewall and Tailscale configuration is reused rather than deliberately removed and recreated.
+
+### Tailscale on the control PC
+
+The local Windows PC / WSL Ansible controller must also be connected to the same Tailscale network. Install Tailscale on the control PC if it is not already present and sign in to the same tailnet.
+
+### SSH key
+
+The bootstrap does not copy private keys or credentials. Ansible authenticates using the dedicated private key configured in `inventory.yml`:
+
+```yaml
+ansible_ssh_private_key_file: ~/.ssh/instabounty_shadow
+```
+
+The corresponding public key must be installed for the Windows account on the Shadow VM before Ansible can use key-based authentication.
+
+After bootstrap, create `host_vars/shadow.yml` from `host_vars/shadow.example.yml` and fill in the Tailscale IP, Windows username and PostgreSQL password.
 
 ## Software Installed
 
@@ -53,6 +106,9 @@ The Ansible configuration installs and configures the main InstaBounty developme
 - Git for Windows
 - GitHub CLI
 - Visual Studio Code
+- Postman
+
+Postman is installed as the Windows desktop application for manual API testing during Gateway and service development.
 
 ### Web development
 
@@ -228,6 +284,16 @@ ansible-playbook -i inventory.yml playbook.yml \
 ```
 
 Ansible reconnects to the Shadow workstation after reboots performed during provisioning.
+
+### Install only Postman
+
+The Postman role is tagged, so it can be run independently without provisioning the full workstation:
+
+```bash
+ansible-playbook -i inventory.yml playbook.yml --tags postman
+```
+
+Because the final reboot task is not tagged `postman`, this command only runs the Postman role and does not reboot the workstation afterward.
 
 ## Manual Configuration After Installation
 
