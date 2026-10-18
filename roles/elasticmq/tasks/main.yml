@@ -1,0 +1,126 @@
+---
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
+- name: Define ElasticMQ configuration
+  ansible.builtin.set_fact:
+    elasticmq_version: '1.7.1'
+    elasticmq_install_dir: 'C:\Program Files\ElasticMQ'
+    elasticmq_jar_name: 'elasticmq-server-all-1.7.1.jar'
+    elasticmq_download_url: 'https://github.com/softwaremill/elasticmq/releases/download/v1.7.1/elasticmq-server-all-1.7.1.jar'
+    elasticmq_sha256: 'a40dfd03fd8e2f17418f3c61a460c1daea902119145bdce97d09a81f03aa0428'
+
+- name: Check whether ElasticMQ is installed
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $jar = 'C:\Program Files\ElasticMQ\elasticmq-server-all-1.7.1.jar'
+      $launcher = 'C:\Program Files\ElasticMQ\elasticmq.cmd'
+
+      $Ansible.Result = @{
+        installed = (Test-Path -LiteralPath $jar) -and (Test-Path -LiteralPath $launcher)
+        jar       = $jar
+        launcher  = $launcher
+      }
+  register: elasticmq_status
+
+- name: Display current ElasticMQ status
+  ansible.builtin.debug:
+    msg:
+      - "ElasticMQ installed: {{ elasticmq_status.result.installed }}"
+      - "Target version: {{ elasticmq_version }}"
+
+- name: Create ElasticMQ installation directory
+  ansible.windows.win_file:
+    path: "{{ elasticmq_install_dir }}"
+    state: directory
+
+- name: Download ElasticMQ standalone server JAR
+  ansible.windows.win_get_url:
+    url: "{{ elasticmq_download_url }}"
+    dest: "{{ elasticmq_install_dir }}\\{{ elasticmq_jar_name }}"
+    checksum: "{{ elasticmq_sha256 }}"
+    checksum_algorithm: sha256
+    force: false
+
+- name: Install ElasticMQ launcher
+  ansible.windows.win_copy:
+    dest: "{{ elasticmq_install_dir }}\\elasticmq.cmd"
+    content: |
+      @echo off
+      setlocal
+
+      if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" (
+          set "JAVA_EXE=%JAVA_HOME%\bin\java.exe"
+      ) else (
+          set "JAVA_EXE=java"
+      )
+
+      "%JAVA_EXE%" -jar "%~dp0{{ elasticmq_jar_name }}" %*
+
+- name: Add ElasticMQ to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - "{{ elasticmq_install_dir }}"
+    scope: machine
+    state: present
+
+- name: Verify ElasticMQ installation
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $jar = 'C:\Program Files\ElasticMQ\elasticmq-server-all-1.7.1.jar'
+      $launcher = 'C:\Program Files\ElasticMQ\elasticmq.cmd'
+      $expectedHash = 'A40DFD03FD8E2F17418F3C61A460C1DAEA902119145BDCE97D09A81F03AA0428'
+
+      if (-not (Test-Path -LiteralPath $jar)) {
+        throw "ElasticMQ JAR was not found at $jar"
+      }
+
+      if (-not (Test-Path -LiteralPath $launcher)) {
+        throw "ElasticMQ launcher was not found at $launcher"
+      }
+
+      $actualHash = (Get-FileHash -LiteralPath $jar -Algorithm SHA256).Hash
+      if ($actualHash -ne $expectedHash) {
+        throw "ElasticMQ SHA-256 mismatch. Expected $expectedHash but found $actualHash"
+      }
+
+      $java = $null
+      if ($env:JAVA_HOME) {
+        $candidate = Join-Path $env:JAVA_HOME 'bin\java.exe'
+        if (Test-Path -LiteralPath $candidate) {
+          $java = $candidate
+        }
+      }
+
+      if (-not $java) {
+        $javaCommand = Get-Command java.exe -ErrorAction SilentlyContinue
+        if ($javaCommand) {
+          $java = $javaCommand.Source
+        }
+      }
+
+      if (-not $java) {
+        throw 'Java could not be found. ElasticMQ requires the Java role to run first.'
+      }
+
+      $Ansible.Result = @{
+        version  = '1.7.1'
+        jar      = $jar
+        launcher = $launcher
+        java     = $java
+        sha256   = $actualHash
+      }
+  register: elasticmq_after
+
+- name: Display installed ElasticMQ details
+  ansible.builtin.debug:
+    msg:
+      - "ElasticMQ version: {{ elasticmq_after.result.version }}"
+      - "ElasticMQ JAR: {{ elasticmq_after.result.jar }}"
+      - "ElasticMQ launcher: {{ elasticmq_after.result.launcher }}"
+      - "Java: {{ elasticmq_after.result.java }}"
