@@ -173,6 +173,17 @@ The initial model configuration includes models for:
 
 - AWS CLI v2
 - Terraform
+- ElasticMQ 1.7.1
+
+ElasticMQ provides an SQS-compatible queue endpoint for local InstaBounty development without Docker. Ansible installs the standalone server JAR under:
+
+```text
+C:\Program Files\ElasticMQ
+```
+
+and adds an `elasticmq.cmd` launcher to the machine `PATH`.
+
+The Ansible role installs the runtime only. It deliberately does not register ElasticMQ as a Windows service or start it automatically; local queue lifecycle and queue configuration belong in the InstaBounty `infrastructure` repository.
 
 AWS resources used by InstaBounty can therefore be provisioned through Terraform rather than being created manually.
 
@@ -295,6 +306,16 @@ ansible-playbook -i inventory.yml playbook.yml --tags postman
 
 Because the final reboot task is not tagged `postman`, this command only runs the Postman role and does not reboot the workstation afterward.
 
+### Install only ElasticMQ
+
+ElasticMQ is also tagged so it can be installed independently after Java is already present:
+
+```bash
+ansible-playbook -i inventory.yml playbook.yml --tags elasticmq
+```
+
+The standalone role verifies the downloaded JAR against the published SHA-256 checksum and installs the `elasticmq.cmd` launcher. It does not start the queue server.
+
 ## Manual Configuration After Installation
 
 Most workstation configuration is automated, but credentials and account authentication are deliberately kept outside the repository.
@@ -352,6 +373,23 @@ terraform version
 ```
 
 Terraform infrastructure configuration belongs in the appropriate InstaBounty infrastructure repository rather than this workstation configuration repository.
+
+### ElasticMQ
+
+Verify the installation files:
+
+```powershell
+Get-ChildItem 'C:\Program Files\ElasticMQ'
+Get-Command elasticmq.cmd
+```
+
+Starting ElasticMQ manually with:
+
+```powershell
+elasticmq.cmd
+```
+
+runs the standalone server using Java. Normal InstaBounty development should eventually start and stop it through the local scripts in the `infrastructure` repository rather than manually.
 
 ### Ollama
 
@@ -412,6 +450,7 @@ Examples:
 - Python → Python / uv
 - Ethereum → Foundry / Anvil
 - PostgreSQL → native Windows PostgreSQL
+- SQS-compatible local queues → ElasticMQ / Java
 - AI models → Ollama
 - Android → JDK / Android SDK
 
