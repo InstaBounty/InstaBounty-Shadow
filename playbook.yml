@@ -24,6 +24,7 @@
     - foundry
     - solidity_tools
     - java
+    - elasticmq
     - android
     - postgresql
     - nvidia
