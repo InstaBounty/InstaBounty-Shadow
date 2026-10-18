@@ -24,7 +24,9 @@
     - foundry
     - solidity_tools
     - java
-    - elasticmq
+    - role: elasticmq
+      tags:
+        - elasticmq
     - android
     - postgresql
     - nvidia
