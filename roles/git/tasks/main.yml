@@ -194,18 +194,18 @@
 
 - name: Create Git template hooks directory
   ansible.windows.win_file:
-    path: "{{ git_user_profile.result }}\.git-templates\hooks"
+    path: '{{ git_user_profile.result }}\.git-templates\hooks'
     state: directory
 
 - name: Install InstaBounty clone hook
   ansible.windows.win_copy:
     src: hooks/post-checkout
-    dest: "{{ git_user_profile.result }}\.git-templates\hooks\post-checkout"
+    dest: '{{ git_user_profile.result }}\.git-templates\hooks\post-checkout'
 
 - name: Install InstaBounty pre-commit hook
   ansible.windows.win_copy:
     src: hooks/pre-commit
-    dest: "{{ git_user_profile.result }}\.git-templates\hooks\pre-commit"
+    dest: '{{ git_user_profile.result }}\.git-templates\hooks\pre-commit'
 
 - name: Configure Git template directory
   ansible.windows.win_command:
