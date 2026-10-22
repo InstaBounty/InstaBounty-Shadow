@@ -185,6 +185,45 @@
       - "{{ git_tools.result.git }}"
       - "{{ git_tools.result.bash }}"
 
+- name: Resolve current Windows user profile
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $Ansible.Result = $env:USERPROFILE
+  register: git_user_profile
+
+- name: Create Git template hooks directory
+  ansible.windows.win_file:
+    path: "{{ git_user_profile.result }}\.git-templates\hooks"
+    state: directory
+
+- name: Install InstaBounty clone hook
+  ansible.windows.win_copy:
+    src: hooks/post-checkout
+    dest: "{{ git_user_profile.result }}\.git-templates\hooks\post-checkout"
+
+- name: Install InstaBounty pre-commit hook
+  ansible.windows.win_copy:
+    src: hooks/pre-commit
+    dest: "{{ git_user_profile.result }}\.git-templates\hooks\pre-commit"
+
+- name: Configure Git template directory
+  ansible.windows.win_command:
+    cmd: >-
+      git config --global init.templateDir
+      "{{ git_user_profile.result }}\.git-templates"
+  changed_when: true
+
+- name: Verify Git template directory
+  ansible.windows.win_command:
+    cmd: git config --global --get init.templateDir
+  register: git_template_dir
+  changed_when: false
+
+- name: Display Git template directory
+  ansible.builtin.debug:
+    msg: "Git template directory: {{ git_template_dir.stdout | trim }}"
+
 - name: Remove Git installer
   ansible.windows.win_file:
     path: C:\Temp\InstaBounty\Git
