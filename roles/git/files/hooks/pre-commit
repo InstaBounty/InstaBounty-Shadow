@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+remote="$(git config --get remote.origin.url || true)"
+remote_lc="$(printf '%s' "${remote}" | tr '[:upper:]' '[:lower:]')"
+
+case "${remote_lc}" in
+  *github.com/instabounty/*|*github.com:instabounty/*)
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+if [[ ! -f "scripts/clone-setup.sh" ]]; then
+  exit 0
+fi
+
+echo
+echo "Running InstaBounty pre-commit verification..."
+bash scripts/clone-setup.sh --skip-sync
