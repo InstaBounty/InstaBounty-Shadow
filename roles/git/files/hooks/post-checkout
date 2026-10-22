@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+remote="$(git config --get remote.origin.url || true)"
+remote_lc="$(printf '%s' "${remote}" | tr '[:upper:]' '[:lower:]')"
+
+case "${remote_lc}" in
+  *github.com/instabounty/*|*github.com:instabounty/*)
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+marker="$(git rev-parse --git-dir)/instabounty-clone-setup-complete"
+if [[ -f "${marker}" ]]; then
+  exit 0
+fi
+
+if [[ ! -f "scripts/clone-setup.sh" ]]; then
+  exit 0
+fi
+
+echo
+echo "Detected InstaBounty repository. Running clone verification..."
+bash scripts/clone-setup.sh
+
+touch "${marker}"
+echo "Clone verification completed successfully."
