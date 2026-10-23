@@ -221,15 +221,19 @@
         throw "Git Bash executable was not found at $bash"
       }
 
-      $resolvedBash = (Get-Command bash.exe -CommandType Application -ErrorAction Stop).Source
+      $resolvedCommands = @(Get-Command bash.exe -CommandType Application -All -ErrorAction Stop)
+      $resolvedBash = $resolvedCommands[0].Source
+
       if ($resolvedBash -ine $bash) {
-        throw "Plain 'bash' resolves to $resolvedBash instead of Git Bash at $bash"
+        $allResolved = ($resolvedCommands | ForEach-Object { $_.Source }) -join ', '
+        throw "Plain 'bash' resolves first to $resolvedBash instead of Git Bash at $bash. All matches: $allResolved"
       }
 
       $Ansible.Result = @{
         git = (& $git --version)
-        bash = (& bash.exe --version | Select-Object -First 1)
+        bash = "Git Bash executable found"
         resolved_bash = $resolvedBash
+        bash_matches = @($resolvedCommands | ForEach-Object { $_.Source })
       }
   register: git_tools
 
@@ -238,7 +242,7 @@
     msg:
       - "{{ git_tools.result.git }}"
       - "{{ git_tools.result.bash }}"
-      - "bash resolves to {{ git_tools.result.resolved_bash }}"
+      - "bash resolves first to {{ git_tools.result.resolved_bash }}"
 
 - name: Resolve current Windows user profile
   ansible.windows.win_powershell:
