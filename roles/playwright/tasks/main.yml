@@ -1,0 +1,102 @@
+---
+- name: Inspect Windows version for Playwright support
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $os = Get-CimInstance Win32_OperatingSystem
+      $Ansible.Result = @{
+        caption = $os.Caption
+        version = $os.Version
+        build   = [int]$os.BuildNumber
+      }
+  register: playwright_windows
+
+- name: Display Windows version for Playwright
+  ansible.builtin.debug:
+    msg: >-
+      Playwright host OS: {{ playwright_windows.result.caption }}
+      (version {{ playwright_windows.result.version }},
+      build {{ playwright_windows.result.build }})
+
+- name: Warn when Windows is outside Playwright's supported Windows 11 baseline
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: Current Playwright releases officially support Windows 11+
+      (or Windows Server 2019+). This workstation reports
+      {{ playwright_windows.result.caption }} build
+      {{ playwright_windows.result.build }}.
+  when:
+    - "'Server' not in playwright_windows.result.caption"
+    - playwright_windows.result.build | int < 22000
+
+- name: Verify Node.js and pnpm are available for Playwright
+  ansible.windows.win_powershell:
+    script: |
+      # WinRM can retain a stale PATH during provisioning.
+      $env:Path = 'C:\Program Files\nodejs;' + $env:Path
+      $Ansible.Changed = $false
+
+      $node = 'C:\Program Files\nodejs\node.exe'
+      if (-not (Test-Path -LiteralPath $node)) {
+        throw 'Node.js is required before the Playwright role can run.'
+      }
+
+      $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+      if ($null -eq $pnpm) {
+        throw 'pnpm is required before the Playwright role can run.'
+      }
+
+      $nodeVersion = (& $node --version).TrimStart('v')
+      if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to determine the installed Node.js version.'
+      }
+
+      $pnpmVersion = (& $pnpm.Source --version).Trim()
+      if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to determine the installed pnpm version.'
+      }
+
+      $Ansible.Result = @{
+        node = $nodeVersion
+        pnpm = $pnpmVersion
+      }
+  register: playwright_node_tools
+
+- name: Validate Playwright Node.js baseline
+  ansible.builtin.assert:
+    that:
+      - playwright_node_tools.result.node is version('22.0.0', '>=')
+    fail_msg: >-
+      Playwright requires a current supported Node.js release.
+      Node.js {{ playwright_node_tools.result.node }} is installed;
+      Node.js 22 or newer is required by this workstation role.
+
+- name: Resolve Playwright browser cache path
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $Ansible.Result = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+  register: playwright_browser_cache
+
+- name: Create Playwright browser cache directory
+  ansible.windows.win_file:
+    path: '{{ playwright_browser_cache.result }}'
+    state: directory
+
+- name: Configure Playwright browser cache for the Shadow user
+  ansible.windows.win_environment:
+    state: present
+    level: user
+    name: PLAYWRIGHT_BROWSERS_PATH
+    value: '{{ playwright_browser_cache.result }}'
+
+- name: Display Playwright workstation readiness
+  ansible.builtin.debug:
+    msg:
+      - "Node.js: {{ playwright_node_tools.result.node }}"
+      - "pnpm: {{ playwright_node_tools.result.pnpm }}"
+      - "Playwright browser cache: {{ playwright_browser_cache.result }}"
+      - >-
+        Browser binaries remain repository-managed so that each project
+        installs the Chromium revision matching its Playwright package.
