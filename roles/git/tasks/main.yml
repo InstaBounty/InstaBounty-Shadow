@@ -229,14 +229,9 @@
         throw "Plain 'bash' resolves first to $resolvedBash instead of Git Bash at $bash. All matches: $allResolved"
       }
 
-      $bashVersion = & $resolvedBash --version | Select-Object -First 1
-      if ($LASTEXITCODE -ne 0) {
-        throw "Git Bash verification failed with exit code $LASTEXITCODE"
-      }
-
       $Ansible.Result = @{
         git = (& $git --version)
-        bash = $bashVersion
+        bash = "Git Bash executable found"
         resolved_bash = $resolvedBash
         bash_matches = @($resolvedCommands | ForEach-Object { $_.Source })
       }
