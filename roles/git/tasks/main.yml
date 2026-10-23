@@ -120,12 +120,60 @@
     state: present
   register: git_path
 
+- name: Prefer Git Bash over the Windows WSL bash launcher
+  ansible.windows.win_powershell:
+    script: |
+      $gitPaths = @(
+        'C:\Program Files\Git\bin',
+        'C:\Program Files\Git\cmd',
+        'C:\Program Files\Git\usr\bin'
+      )
+
+      foreach ($gitPath in $gitPaths) {
+        if (-not (Test-Path -LiteralPath $gitPath)) {
+          throw "Expected Git path was not found: $gitPath"
+        }
+      }
+
+      $currentPath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+      $existing = @(
+        $currentPath -split ';' |
+          ForEach-Object { $_.Trim() } |
+          Where-Object { $_ }
+      )
+
+      $remaining = @(
+        $existing | Where-Object {
+          $entry = $_
+          -not ($gitPaths | Where-Object { $_ -ieq $entry })
+        }
+      )
+
+      $desiredEntries = @($gitPaths) + $remaining
+      $desiredPath = $desiredEntries -join ';'
+
+      if ($currentPath -cne $desiredPath) {
+        [Environment]::SetEnvironmentVariable('Path', $desiredPath, 'Machine')
+        $Ansible.Changed = $true
+      } else {
+        $Ansible.Changed = $false
+      }
+
+      $Ansible.Result = @{
+        first_path_entry = $desiredEntries[0]
+        bash_path = 'C:\Program Files\Git\bin\bash.exe'
+      }
+  register: git_bash_path
+
 - name: Reboot after Git configuration
   ansible.windows.win_reboot:
     msg: Rebooting to apply Git command-line configuration
     reboot_timeout: 600
   when:
-    - git_install.changed | default(false) or git_path.changed
+    - >-
+      git_install.changed | default(false) or
+      git_path.changed or
+      git_bash_path.changed
 
 - name: Verify Git after reboot
   ansible.windows.win_command:
@@ -173,9 +221,15 @@
         throw "Git Bash executable was not found at $bash"
       }
 
+      $resolvedBash = (Get-Command bash.exe -CommandType Application -ErrorAction Stop).Source
+      if ($resolvedBash -ine $bash) {
+        throw "Plain 'bash' resolves to $resolvedBash instead of Git Bash at $bash"
+      }
+
       $Ansible.Result = @{
-        git  = (& $git --version)
-        bash = (& $bash --version | Select-Object -First 1)
+        git = (& $git --version)
+        bash = (& bash.exe --version | Select-Object -First 1)
+        resolved_bash = $resolvedBash
       }
   register: git_tools
 
@@ -184,6 +238,7 @@
     msg:
       - "{{ git_tools.result.git }}"
       - "{{ git_tools.result.bash }}"
+      - "bash resolves to {{ git_tools.result.resolved_bash }}"
 
 - name: Resolve current Windows user profile
   ansible.windows.win_powershell:
