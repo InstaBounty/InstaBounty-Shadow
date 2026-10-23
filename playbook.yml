@@ -18,7 +18,9 @@
         - postman
     - node
     - node_tools
-    - playwright
+    - role: playwright
+      tags:
+        - playwright
     - python
     - uv
     - build_tools
