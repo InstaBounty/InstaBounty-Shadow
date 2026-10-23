@@ -18,6 +18,7 @@
         - postman
     - node
     - node_tools
+    - playwright
     - python
     - uv
     - build_tools
