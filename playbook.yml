@@ -10,6 +10,9 @@
     - powershell
     - windows_terminal
     - sevenzip
+    - role: connectivity
+      tags:
+        - connectivity
     - git
     - github_cli
     - vscode
@@ -43,8 +46,8 @@
     - name: Reboot workstation after provisioning
       ansible.windows.win_reboot:
         msg: Rebooting after InstaBounty workstation provisioning
-        reboot_timeout: 900
-        connect_timeout: 10
-        post_reboot_delay: 30
+        reboot_timeout: 600
+        connect_timeout: 5
+        post_reboot_delay: 5
         test_command: 'Write-Output "ready"'
       when: perform_final_reboot | bool
