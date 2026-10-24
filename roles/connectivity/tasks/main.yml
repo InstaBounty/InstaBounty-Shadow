@@ -1,0 +1,114 @@
+---
+- name: Ensure OpenSSH service is automatic and running
+  ansible.windows.win_service:
+    name: sshd
+    start_mode: auto
+    state: started
+
+- name: Ensure Tailscale service is automatic and running
+  ansible.windows.win_service:
+    name: Tailscale
+    start_mode: auto
+    state: started
+
+- name: Configure restart-on-failure for remote connectivity services
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      foreach ($serviceName in @('sshd', 'Tailscale')) {
+        & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to configure recovery actions for $serviceName"
+        }
+
+        & sc.exe failureflag $serviceName 1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to enable failure actions for $serviceName"
+        }
+      }
+
+      $Ansible.Changed = $true
+
+- name: Create InstaBounty connectivity directory
+  ansible.windows.win_file:
+    path: C:\ProgramData\InstaBounty
+    state: directory
+
+- name: Install post-boot connectivity watchdog
+  ansible.windows.win_copy:
+    src: ensure-remote-connectivity.ps1
+    dest: C:\ProgramData\InstaBounty\ensure-remote-connectivity.ps1
+
+- name: Register post-boot connectivity watchdog task
+  ansible.windows.win_powershell:
+    script: |
+      $taskName = 'InstaBounty-EnsureRemoteConnectivity'
+      $scriptPath = 'C:\ProgramData\InstaBounty\ensure-remote-connectivity.ps1'
+
+      $action = New-ScheduledTaskAction `
+        -Execute 'powershell.exe' `
+        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+      $trigger = New-ScheduledTaskTrigger -AtStartup
+      $trigger.Delay = 'PT15S'
+
+      $principal = New-ScheduledTaskPrincipal `
+        -UserId 'SYSTEM' `
+        -LogonType ServiceAccount `
+        -RunLevel Highest
+
+      $settings = New-ScheduledTaskSettingsSet `
+        -StartWhenAvailable `
+        -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 3)
+
+      $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+      if ($existing) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+      }
+
+      Register-ScheduledTask `
+        -TaskName $taskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Description 'Ensures Tailscale and OpenSSH are reachable after Windows startup.' | Out-Null
+
+      $Ansible.Changed = $true
+
+- name: Verify remote connectivity services
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+
+      $sshd = Get-Service -Name 'sshd' -ErrorAction Stop
+      $tailscale = Get-Service -Name 'Tailscale' -ErrorAction Stop
+      $listener = Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue
+
+      if ($sshd.Status -ne 'Running') {
+        throw 'sshd is not running'
+      }
+
+      if ($tailscale.Status -ne 'Running') {
+        throw 'Tailscale is not running'
+      }
+
+      if (-not $listener) {
+        throw 'Nothing is listening on TCP port 22'
+      }
+
+      $Ansible.Result = @{
+        sshd = $sshd.Status.ToString()
+        tailscale = $tailscale.Status.ToString()
+        ssh_port = 22
+      }
+  register: connectivity_status
+
+- name: Display remote connectivity status
+  ansible.builtin.debug:
+    msg:
+      - "sshd: {{ connectivity_status.result.sshd }}"
+      - "Tailscale: {{ connectivity_status.result.tailscale }}"
+      - "SSH port: {{ connectivity_status.result.ssh_port }}"
