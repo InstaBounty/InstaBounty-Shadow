@@ -21,18 +21,12 @@ DEFAULT_REVIEWER_MODEL = "gemma3:4b"
 MAX_FILE_BYTES = 1_000_000
 MAX_TOOL_OUTPUT = 30_000
 SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", ".next", ".pytest_cache"}
-ALLOWED_COMMANDS = {
-    "uv",
-    "pytest",
-    "ruff",
-    "mypy",
-    "coverage",
-    "pnpm",
-    "npm",
-    "npx",
-    "forge",
-    "cast",
-    "solc",
+DIRECT_COMMANDS = {"pytest", "ruff", "mypy", "coverage", "solc"}
+COMMAND_SUBCOMMANDS = {
+    "uv": {"run"},
+    "pnpm": {"test", "run", "exec", "lint"},
+    "npm": {"test", "run"},
+    "forge": {"test", "build", "fmt"},
 }
 READ_ONLY_GIT_COMMANDS = {"status", "diff", "log", "show", "grep", "ls-files", "rev-parse"}
 PROTECTED_BRANCHES = {"main", "master"}
@@ -43,6 +37,10 @@ class AgentError(RuntimeError):
 
 
 def run_process(args: list[str], cwd: Path, timeout: int = 300, check: bool = False) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["UV_OFFLINE"] = "1"
+    environment["NPM_CONFIG_OFFLINE"] = "true"
+    environment["PNPM_CONFIG_OFFLINE"] = "true"
     result = subprocess.run(
         args,
         cwd=str(cwd),
@@ -50,6 +48,7 @@ def run_process(args: list[str], cwd: Path, timeout: int = 300, check: bool = Fa
         capture_output=True,
         timeout=timeout,
         shell=False,
+        env=environment,
     )
     if check and result.returncode != 0:
         raise AgentError(
@@ -91,7 +90,7 @@ def slugify(value: str, limit: int = 36) -> str:
 
 
 def create_work_branch(repo: Path, base: str, branch: str | None, task: str) -> str:
-    if base.lower() not in PROTECTED_BRANCHES and not base:
+    if not base:
         raise AgentError("A base branch is required.")
     git(repo, "show-ref", "--verify", f"refs/heads/{base}")
     git(repo, "switch", base)
@@ -212,7 +211,11 @@ def validate_command(args: list[Any]) -> list[str]:
     if command in {"git", "git.exe"}:
         if len(args) < 2 or args[1].lower() not in READ_ONLY_GIT_COMMANDS:
             raise AgentError("Only read-only Git commands are available to the model.")
-    elif command not in ALLOWED_COMMANDS:
+    elif command in COMMAND_SUBCOMMANDS:
+        if len(args) < 2 or args[1].lower() not in COMMAND_SUBCOMMANDS[command]:
+            allowed = ", ".join(sorted(COMMAND_SUBCOMMANDS[command]))
+            raise AgentError(f"Allowed {command} subcommands: {allowed}")
+    elif command not in DIRECT_COMMANDS:
         raise AgentError(f"Command is not allow-listed: {args[0]}")
     return [str(value) for value in args]
 
@@ -323,6 +326,8 @@ def run_developer(
 
 
 def working_diff(repo: Path, base: str) -> str:
+    # Intent-to-add makes newly created files visible in `git diff` without staging content.
+    git(repo, "add", "-N", "--", ".", check=False)
     staged = git(repo, "diff", "--cached", check=False).stdout
     unstaged = git(repo, "diff", check=False).stdout
     diff = staged + unstaged
