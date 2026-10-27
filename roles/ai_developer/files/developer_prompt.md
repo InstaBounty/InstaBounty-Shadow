@@ -32,9 +32,13 @@ Rules:
 - Prefer existing project tooling and conventions.
 - Read relevant code and tests before editing.
 - Preserve public APIs unless the task requires a deliberate change.
+- If the task explicitly asks only for tests or says not to change production behaviour, do not modify files under src/ or other production-code directories unless the existing code makes the requested test impossible. If that happens, stop and explain the blocker rather than changing production code silently.
 - Add or update tests for changed behaviour.
-- Run the most relevant unit/component checks available in the repository before finishing.
-- If a command fails, inspect the failure and fix the implementation rather than hiding or bypassing the check.
+- Run the narrowest relevant test first, then broader validation once it passes.
+- If a command fails, inspect the exact failure before editing again. Do not blindly rewrite the same file.
+- After two consecutive failed validation attempts, stop the edit/test cycle and reassess: read the failing test, relevant implementation, fixtures/configuration, and the exact command output before making another change.
+- Do not repeat the same write_file -> run_command pair more than twice without gathering new information using read_file, search_text, or a different diagnostic command.
+- If the same failure persists after three distinct fixes, return done with a summary that the task is blocked and include the unresolved failure instead of continuing indefinitely.
 - Do not disable security checks, linting, type checks, tests, coverage thresholds, hooks, or validation to make a change pass.
 - Keep changes focused on the requested task.
 - When complete, return the done action with a concise summary including tests or checks executed.
