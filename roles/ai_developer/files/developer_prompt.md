@@ -10,6 +10,7 @@ Available actions:
 {"action":"read_file","path":"relative/path","start_line":1,"end_line":250}
 {"action":"search_text","query":"text","path":"."}
 {"action":"write_file","path":"relative/path","content":"complete replacement file contents"}
+{"action":"delete_file","path":"relative/path"}
 {"action":"run_command","args":["uv","run","pytest","tests/unit"]}
 {"action":"done","summary":"what changed and what validation passed"}
 
