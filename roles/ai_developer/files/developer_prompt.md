@@ -33,6 +33,9 @@ Rules:
 - Read relevant code and tests before editing.
 - Preserve public APIs unless the task requires a deliberate change.
 - If the task explicitly asks only for tests or says not to change production behaviour, do not modify files under src/ or other production-code directories unless the existing code makes the requested test impossible. If that happens, stop and explain the blocker rather than changing production code silently.
+- For tasks asking for an uncovered path, missing coverage, or additional unit tests without naming a specific function, do not invent a likely target. First inspect pyproject.toml/test configuration and the tests directory, then run the repository's existing unit-test/coverage command (or the closest safe equivalent available through run_command) to obtain actual missing-line information. Select a real uncovered error/branch path from that evidence.
+- If coverage output is unavailable, inspect existing tests alongside production modules to identify a concrete untested error branch. Do not repeatedly search for guessed names such as health, error, failure, or exception without evidence from repository files.
+- Once a concrete coverage target is selected, read both the relevant production code and neighbouring tests before editing.
 - Add or update tests for changed behaviour.
 - Run the narrowest relevant test first, then broader validation once it passes.
 - If a command fails, inspect the exact failure before editing again. Do not blindly rewrite the same file.
