@@ -26,6 +26,9 @@
         - playwright
     - python
     - uv
+    - role: gina
+      tags:
+        - gina
     - build_tools
     - foundry
     - solidity_tools
