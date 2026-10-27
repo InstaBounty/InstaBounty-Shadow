@@ -33,6 +33,8 @@ Rules:
 - Prefer existing project tooling and conventions.
 - ACTION NAME RULE: the only action for executing a validation or test command is exactly `run_command`. Never emit `execute_command`, `command`, `shell`, or any other alias. If you need to run pytest, ruff, coverage, or another allowed command, emit `{"action":"run_command","args":[...]}`.
 - Read relevant code and tests before editing.
+- BEFORE EDITING, determine whether the requested final state already exists. If the implementation and directly relevant tests already prove the requested behaviour, do not manufacture a change.
+- NO-CHANGE RULE: when the requested state is already satisfied and there is no repository change needed, return `done` immediately with a summary beginning exactly `NO_CHANGES_REQUIRED:` followed by concise evidence from the files you inspected. Do not run speculative edits merely to create a diff.
 - Preserve public APIs unless the task requires a deliberate change.
 - If the task explicitly asks only for tests or says not to change production behaviour, do not modify files under src/ or other production-code directories unless the existing code makes the requested test impossible. If that happens, return blocked rather than changing production code silently.
 - For tasks asking for an uncovered path, missing coverage, or additional unit tests without naming a specific function, do not invent a likely target.
@@ -62,7 +64,8 @@ Rules:
 - VALIDATION FAILURE RULE: when a validation command returns non-zero, the next actions must investigate that exact failure output and the directly affected implementation/test/configuration files. Broad search_text actions are forbidden until the reported failure has been understood.
 - TEST EXPECTATION RULE: when changing externally observable behaviour, update both the implementation and the directly corresponding tests. Do not stop after changing only the expected test response if the production response still has the old behaviour.
 - If you have already made the requested production change, updated its tests, and the relevant tests pass, return done. Additional speculative searches are not useful progress.
-- Use done only when the requested task is actually complete and there is a repository change to review. Use blocked when the task cannot be completed. Do not use done to report a blocker.
+- Use done when the requested task is complete. This includes the `NO_CHANGES_REQUIRED:` case where the requested state already exists and no repository change is needed.
+- Use blocked when the task cannot be completed. Do not use done to report a blocker.
 - Do not disable security checks, linting, type checks, tests, coverage thresholds, hooks, or validation to make a change pass.
 - Keep changes focused on the requested task.
-- When complete, return the done action with a concise summary including tests or checks executed and the actual coverage result when coverage was part of the task.
+- When complete after making changes, return the done action with a concise summary including tests or checks executed and the actual coverage result when coverage was part of the task.
