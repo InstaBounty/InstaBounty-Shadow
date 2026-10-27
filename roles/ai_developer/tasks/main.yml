@@ -1,0 +1,94 @@
+---
+- name: Resolve current Windows user profile
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $Ansible.Result = $env:USERPROFILE
+  register: ai_developer_user_profile
+
+- name: Verify Ollama API is available for AI developer
+  ansible.windows.win_uri:
+    url: "{{ ai_developer_ollama_url }}/api/version"
+    method: GET
+    status_code: 200
+  register: ai_developer_ollama_status
+  retries: 10
+  delay: 2
+  until: ai_developer_ollama_status.status_code == 200
+
+- name: Read installed Ollama models for AI developer
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $response = Invoke-RestMethod -Uri '{{ ai_developer_ollama_url }}/api/tags' -Method Get -TimeoutSec 10
+      $models = @()
+      if ($response.models) {
+        $models = @($response.models | ForEach-Object { $_.name })
+      }
+      $Ansible.Result = $models
+  register: ai_developer_models
+
+- name: Validate AI developer models are installed
+  ansible.builtin.assert:
+    that:
+      - ai_developer_model in ai_developer_models.result
+      - ai_reviewer_model in ai_developer_models.result
+    fail_msg: >-
+      The AI developer requires {{ ai_developer_model }} and
+      {{ ai_reviewer_model }}. Run the llm_models role first.
+
+- name: Create AI developer install directory
+  ansible.windows.win_file:
+    path: "{{ ai_developer_install_dir }}"
+    state: directory
+
+- name: Create AI developer bin directory
+  ansible.windows.win_file:
+    path: "{{ ai_developer_bin_dir }}"
+    state: directory
+
+- name: Install AI developer runner
+  ansible.windows.win_copy:
+    src: ai_developer.py
+    dest: "{{ ai_developer_install_dir }}\\ai_developer.py"
+
+- name: Install AI developer system prompt
+  ansible.windows.win_copy:
+    src: developer_prompt.md
+    dest: "{{ ai_developer_install_dir }}\\developer_prompt.md"
+
+- name: Install AI reviewer system prompt
+  ansible.windows.win_copy:
+    src: reviewer_prompt.md
+    dest: "{{ ai_developer_install_dir }}\\reviewer_prompt.md"
+
+- name: Install AI developer command
+  ansible.windows.win_template:
+    src: ai-dev.cmd.j2
+    dest: "{{ ai_developer_bin_dir }}\\ai-dev.cmd"
+
+- name: Install AI review command
+  ansible.windows.win_template:
+    src: ai-review.cmd.j2
+    dest: "{{ ai_developer_bin_dir }}\\ai-review.cmd"
+
+- name: Add AI developer commands to machine PATH
+  ansible.windows.win_path:
+    elements:
+      - "{{ ai_developer_bin_dir }}"
+    scope: machine
+    state: present
+
+- name: Verify AI developer runner syntax
+  ansible.windows.win_command:
+    cmd: >-
+      py -3 -m py_compile
+      "{{ ai_developer_install_dir }}\\ai_developer.py"
+  changed_when: false
+
+- name: Display AI developer installation
+  ansible.builtin.debug:
+    msg:
+      - "AI developer model: {{ ai_developer_model }}"
+      - "AI reviewer model: {{ ai_reviewer_model }}"
+      - "Run ai-dev --help from a new terminal after provisioning."

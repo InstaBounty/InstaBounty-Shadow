@@ -38,6 +38,9 @@
     - nvidia
     - ollama
     - llm_models
+    - role: ai_developer
+      tags:
+        - ai_developer
     - aws_cli
     - terraform
     - vscode_extensions
