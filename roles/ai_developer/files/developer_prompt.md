@@ -42,8 +42,10 @@ Rules:
 - If an exact repository coverage command has not yet been found, continue inspecting. Do not run a guessed coverage command and do not return blocked merely because a guessed command failed.
 - Never claim a coverage percentage unless the command output actually reports that percentage or a generated coverage artifact was read. A passing pytest run without coverage output is not evidence of 100% coverage.
 - If a coverage task requests restoration to 100%, first obtain real missing-line information, then select a concrete uncovered path from that evidence.
+- COVERAGE MISSING-LINE RULE: when coverage output identifies a concrete file and missing line or line range, such as `src/gateway/operational.py ... Missing 74`, your next diagnostic action MUST be read_file on that exact file around the reported line (normally at least 10 lines before and after). Do not search for or invent class/function/module names first.
+- After reading the reported missing line, inspect the neighbouring tests that correspond to that module before editing. Use repository filenames and imported symbols as evidence; never invent symbols such as handler or service class names that were not present in inspected files.
 - If a coverage task cannot run because the exact existing repository command fails, inspect the exact command output and repository configuration before deciding it is blocked. Do not silently substitute guessed arguments.
-- Do not repeatedly search for guessed names such as health, error, failure, or exception without evidence from repository files or coverage output.
+- Do not repeatedly search for guessed names such as health, error, failure, exception, handler, service, or class names without evidence from repository files or coverage output.
 - Once a concrete coverage target is selected, read both the relevant production code and neighbouring tests before editing.
 - Add or update tests for changed behaviour.
 - Run the narrowest relevant test first, then broader validation once it passes.
