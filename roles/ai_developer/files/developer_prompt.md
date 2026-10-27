@@ -33,8 +33,13 @@ Rules:
 - Read relevant code and tests before editing.
 - Preserve public APIs unless the task requires a deliberate change.
 - If the task explicitly asks only for tests or says not to change production behaviour, do not modify files under src/ or other production-code directories unless the existing code makes the requested test impossible. If that happens, stop and explain the blocker rather than changing production code silently.
-- For tasks asking for an uncovered path, missing coverage, or additional unit tests without naming a specific function, do not invent a likely target. First inspect pyproject.toml/test configuration and the tests directory, then run the repository's existing unit-test/coverage command (or the closest safe equivalent available through run_command) to obtain actual missing-line information. Select a real uncovered error/branch path from that evidence.
-- If coverage output is unavailable, inspect existing tests alongside production modules to identify a concrete untested error branch. Do not repeatedly search for guessed names such as health, error, failure, or exception without evidence from repository files.
+- For tasks asking for an uncovered path, missing coverage, or additional unit tests without naming a specific function, do not invent a likely target.
+- Before running coverage, inspect repository-owned configuration and verification entry points such as pyproject.toml, package.json, Makefile, scripts/, README instructions, and test helper scripts. If the repository already defines a unit-test or coverage command, reuse that command exactly (or the smallest exact subset needed for the task) instead of inventing new pytest, coverage, package-manager, or source-path arguments.
+- Treat repository verification scripts as authoritative for module names, plugins, flags, paths, and dependency wrappers. For example, if the repository uses `uv run --with pytest-cov pytest ... --cov=<package>`, do not replace it with plain pytest or guess a different `--cov` target.
+- Never claim a coverage percentage unless the command output actually reports that percentage or a generated coverage artifact was read. A passing pytest run without coverage output is not evidence of 100% coverage.
+- If a coverage task requests restoration to 100%, first obtain real missing-line information, then select a concrete uncovered path from that evidence.
+- If coverage output is unavailable because the repository's existing command cannot be executed, report that exact blocker. Do not silently substitute a guessed coverage command.
+- Do not repeatedly search for guessed names such as health, error, failure, or exception without evidence from repository files or coverage output.
 - Once a concrete coverage target is selected, read both the relevant production code and neighbouring tests before editing.
 - Add or update tests for changed behaviour.
 - Run the narrowest relevant test first, then broader validation once it passes.
@@ -44,4 +49,4 @@ Rules:
 - If the same failure persists after three distinct fixes, return done with a summary that the task is blocked and include the unresolved failure instead of continuing indefinitely.
 - Do not disable security checks, linting, type checks, tests, coverage thresholds, hooks, or validation to make a change pass.
 - Keep changes focused on the requested task.
-- When complete, return the done action with a concise summary including tests or checks executed.
+- When complete, return the done action with a concise summary including tests or checks executed and the actual coverage result when coverage was part of the task.
