@@ -331,11 +331,17 @@ def run_developer(
     for item in feedback or []:
         messages.append({"role": "user", "content": f"Code review feedback to resolve:\n{item}"})
 
+    mutation_seen = False
     for step in range(1, max_steps + 1):
         print(f"[developer {step}/{max_steps}] asking {model}...")
         action = ollama_chat(ollama_url, model, messages)
+
+        if action.get("action") == "execute_command":
+            action = {**action, "action": "run_command"}
+
         messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
-        print(f"  action: {action.get('action', '<missing>')}")
+        action_name = str(action.get("action", ""))
+        print(f"  action: {action_name or '<missing>'}")
         try:
             status, result = dispatch_action(repo, action)
         except (AgentError, OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -343,6 +349,21 @@ def run_developer(
             status = "continue"
         print_tool_result(action, result)
         messages.append({"role": "user", "content": "Tool result:\n" + json.dumps(result, ensure_ascii=False)})
+
+        if action_name in {"write_file", "delete_file"} and "error" not in result:
+            mutation_seen = True
+
+        if (
+            action_name == "run_command"
+            and mutation_seen
+            and result.get("returncode") == 0
+        ):
+            command = " ".join(str(value) for value in result.get("args", []))
+            return {
+                "status": "done",
+                "summary": f"Repository changes made and validation passed: {command}",
+            }
+
         if status in {"done", "blocked"}:
             return {"status": status, "summary": str(result["summary"])}
     raise AgentError(f"Developer exceeded the maximum of {max_steps} steps.")
