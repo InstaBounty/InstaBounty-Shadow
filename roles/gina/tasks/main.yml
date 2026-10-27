@@ -1,0 +1,54 @@
+---
+- name: Ensure InstaBounty repository directory exists
+  ansible.windows.win_file:
+    path: 'C:\Users\Shadow\instabounty'
+    state: directory
+
+- name: Check whether Gina repository is already cloned
+  ansible.windows.win_stat:
+    path: '{{ gina_repo_dir }}\.git'
+  register: gina_repo
+
+- name: Clone Gina repository
+  ansible.windows.win_shell: >-
+    gh repo clone InstaBounty/gina "{{ gina_repo_dir }}"
+  when: not gina_repo.stat.exists
+
+- name: Update Gina repository
+  ansible.windows.win_shell: >-
+    git -C "{{ gina_repo_dir }}" pull --ff-only
+  when: gina_repo.stat.exists
+
+- name: Install Gina dependencies
+  ansible.windows.win_shell: >-
+    uv sync --group dev
+  args:
+    chdir: '{{ gina_repo_dir }}'
+
+- name: Ensure InstaBounty bin directory exists
+  ansible.windows.win_file:
+    path: '{{ gina_bin_dir }}'
+    state: directory
+
+- name: Install Gina start launcher
+  ansible.windows.win_template:
+    src: gina-start.cmd.j2
+    dest: '{{ gina_bin_dir }}\gina-start.cmd'
+
+- name: Install Gina verification launcher
+  ansible.windows.win_template:
+    src: gina-check.cmd.j2
+    dest: '{{ gina_bin_dir }}\gina-check.cmd'
+
+- name: Ensure InstaBounty bin directory is on the machine PATH
+  ansible.windows.win_path:
+    elements:
+      - '{{ gina_bin_dir }}'
+    scope: machine
+    state: present
+
+- name: Verify Gina configuration imports successfully
+  ansible.windows.win_shell: >-
+    uv run python -c "from gina.config import Settings; print('gina import ok')"
+  args:
+    chdir: '{{ gina_repo_dir }}'

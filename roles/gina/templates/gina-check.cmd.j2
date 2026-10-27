@@ -1,0 +1,6 @@
+@echo off
+setlocal
+cd /d "{{ gina_repo_dir }}"
+uv run pytest
+if errorlevel 1 exit /b %errorlevel%
+uv run ruff check .
