@@ -20,6 +20,7 @@ DEFAULT_DEVELOPER_MODEL = "qwen2.5-coder:7b"
 DEFAULT_REVIEWER_MODEL = "gemma3:4b"
 MAX_FILE_BYTES = 1_000_000
 MAX_TOOL_OUTPUT = 30_000
+CONSOLE_TOOL_OUTPUT = 4_000
 SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", ".next", ".pytest_cache"}
 DIRECT_COMMANDS = {"pytest", "ruff", "mypy", "coverage", "solc"}
 COMMAND_SUBCOMMANDS = {
@@ -231,6 +232,25 @@ def execute_command(repo: Path, args: list[Any]) -> dict[str, Any]:
     }
 
 
+def print_tool_result(action: dict[str, Any], result: dict[str, Any]) -> None:
+    if action.get("action") != "run_command":
+        return
+    args = result.get("args", action.get("args", []))
+    print(f"  command: {' '.join(str(value) for value in args)}")
+    if "returncode" in result:
+        print(f"  exit: {result['returncode']}")
+    stdout = str(result.get("stdout", "")).strip()
+    stderr = str(result.get("stderr", "")).strip()
+    if stdout:
+        print("  stdout:")
+        print(truncate(stdout, CONSOLE_TOOL_OUTPUT))
+    if stderr:
+        print("  stderr:")
+        print(truncate(stderr, CONSOLE_TOOL_OUTPUT))
+    if result.get("error"):
+        print(f"  error: {result['error']}")
+
+
 def ollama_chat(url: str, model: str, messages: list[dict[str, str]], timeout: int = 600) -> dict[str, Any]:
     payload = json.dumps(
         {"model": model, "messages": messages, "stream": False, "format": "json"}
@@ -265,27 +285,29 @@ def repository_context(repo: Path) -> str:
     return f"Git status:\n{status}\n\nTracked files:\n" + "\n".join(visible_files) + suffix
 
 
-def dispatch_action(repo: Path, action: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+def dispatch_action(repo: Path, action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     name = action.get("action")
     if name == "list_files":
-        return False, list_files(repo, str(action.get("path", ".")), str(action.get("pattern", "*")))
+        return "continue", list_files(repo, str(action.get("path", ".")), str(action.get("pattern", "*")))
     if name == "read_file":
-        return False, read_file(
+        return "continue", read_file(
             repo,
             str(action.get("path", "")),
             int(action.get("start_line", 1)),
             int(action.get("end_line", 250)),
         )
     if name == "search_text":
-        return False, search_text(repo, str(action.get("query", "")), str(action.get("path", ".")))
+        return "continue", search_text(repo, str(action.get("query", "")), str(action.get("path", ".")))
     if name == "write_file":
-        return False, write_file(repo, str(action.get("path", "")), str(action.get("content", "")))
+        return "continue", write_file(repo, str(action.get("path", "")), str(action.get("content", "")))
     if name == "delete_file":
-        return False, delete_file(repo, str(action.get("path", "")))
+        return "continue", delete_file(repo, str(action.get("path", "")))
     if name == "run_command":
-        return False, execute_command(repo, action.get("args", []))
+        return "continue", execute_command(repo, action.get("args", []))
     if name == "done":
-        return True, {"summary": str(action.get("summary", "Development task complete."))}
+        return "done", {"summary": str(action.get("summary", "Development task complete."))}
+    if name == "blocked":
+        return "blocked", {"summary": str(action.get("summary", "Development task is blocked."))}
     raise AgentError(f"Unknown model action: {name!r}")
 
 
@@ -296,7 +318,7 @@ def run_developer(
     model: str,
     max_steps: int,
     feedback: list[str] | None = None,
-) -> str:
+) -> dict[str, str]:
     install_dir = Path(__file__).resolve().parent
     system_prompt = (install_dir / "developer_prompt.md").read_text(encoding="utf-8")
     messages: list[dict[str, str]] = [
@@ -315,13 +337,14 @@ def run_developer(
         messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
         print(f"  action: {action.get('action', '<missing>')}")
         try:
-            done, result = dispatch_action(repo, action)
+            status, result = dispatch_action(repo, action)
         except (AgentError, OSError, ValueError, subprocess.SubprocessError) as exc:
             result = {"error": str(exc)}
-            done = False
+            status = "continue"
+        print_tool_result(action, result)
         messages.append({"role": "user", "content": "Tool result:\n" + json.dumps(result, ensure_ascii=False)})
-        if done:
-            return result["summary"]
+        if status in {"done", "blocked"}:
+            return {"status": status, "summary": str(result["summary"])}
     raise AgentError(f"Developer exceeded the maximum of {max_steps} steps.")
 
 
@@ -351,10 +374,18 @@ def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) 
     issues = review.get("issues", [])
     if not isinstance(issues, list):
         issues = [str(issues)]
+    normalized_issues = [str(issue).strip() for issue in issues if str(issue).strip()]
+    summary = str(review.get("summary", "")).strip()
+    if not approved and not normalized_issues:
+        normalized_issues = [
+            "Reviewer rejected the change without an actionable issue. Re-inspect the requested task and proposed diff, then correct any mismatch before requesting review again."
+        ]
+    if not summary:
+        summary = "Approved." if approved else "Reviewer found a blocking issue."
     return {
         "approved": approved,
-        "summary": str(review.get("summary", "")),
-        "issues": [str(issue) for issue in issues],
+        "summary": summary,
+        "issues": normalized_issues,
     }
 
 
@@ -373,8 +404,11 @@ def command_develop(args: argparse.Namespace) -> int:
     branch = create_work_branch(repo, args.base, args.branch, args.task)
     print(f"Working branch: {branch}")
 
-    summary = run_developer(repo, args.task, args.ollama_url, args.model, args.max_steps)
-    print(f"Developer summary: {summary}")
+    developer_result = run_developer(repo, args.task, args.ollama_url, args.model, args.max_steps)
+    print(f"Developer summary: {developer_result['summary']}")
+    if developer_result["status"] == "blocked":
+        print("Developer reported the task as blocked. No review was requested; branch and working tree were left intact for inspection.", file=sys.stderr)
+        return 2
 
     if not working_diff(repo, args.base).strip():
         raise AgentError("Developer reported completion but made no repository changes.")
@@ -388,7 +422,7 @@ def command_develop(args: argparse.Namespace) -> int:
             break
         feedback = "\n".join(f"- {issue}" for issue in review["issues"])
         if review_pass < args.review_passes:
-            summary = run_developer(
+            developer_result = run_developer(
                 repo,
                 args.task,
                 args.ollama_url,
@@ -396,7 +430,10 @@ def command_develop(args: argparse.Namespace) -> int:
                 args.max_steps,
                 feedback=[feedback],
             )
-            print(f"Developer revision summary: {summary}")
+            print(f"Developer revision summary: {developer_result['summary']}")
+            if developer_result["status"] == "blocked":
+                print("Developer revision reported the task as blocked. Branch and working tree were left intact for inspection.", file=sys.stderr)
+                return 2
 
     if not review or not review["approved"]:
         print("Reviewer did not approve the change. The branch and working tree were left intact for inspection.", file=sys.stderr)
