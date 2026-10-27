@@ -92,6 +92,8 @@ The runner is intentionally more restrictive than a general shell agent.
 - The model cannot change branches, push, merge, rebase, reset, or tag.
 - Git mutation is performed by the runner itself.
 - The model receives only an allow-listed set of development commands.
+- Dependency-install/update subcommands are not exposed to the model.
+- `uv`, npm and pnpm are executed with offline environment settings.
 - Shell metacharacter expansion is avoided by executing commands as argument arrays rather than through `cmd.exe` or PowerShell.
 - The runner does not read credentials or inject secrets into model prompts.
 - A dirty working tree is rejected at startup to avoid overwriting manual work.
@@ -102,17 +104,15 @@ The command allow-list is a guardrail rather than an operating-system sandbox. R
 
 The implementation agent may invoke:
 
-- `uv`
-- `pytest`
-- `ruff`
-- `mypy`
-- `coverage`
-- `pnpm`
-- `npm`
-- `npx`
-- `forge`
-- `cast`
-- `solc`
+- `uv run ...`
+- `pytest ...`
+- `ruff ...`
+- `mypy ...`
+- `coverage ...`
+- `pnpm test`, `pnpm run`, `pnpm exec`, and `pnpm lint`
+- `npm test` and `npm run`
+- `forge test`, `forge build`, and `forge fmt`
+- `solc ...`
 - read-only Git commands such as `status`, `diff`, `log`, `show`, `grep`, `ls-files`, and `rev-parse`
 
 Additional command families should be added deliberately when a repository actually needs them.
