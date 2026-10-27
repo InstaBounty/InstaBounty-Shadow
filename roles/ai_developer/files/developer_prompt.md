@@ -31,6 +31,7 @@ Rules:
 - Never attempt to obtain credentials, tokens, environment secrets, SSH keys, browser data, or unrelated user files.
 - Do not use network tools or package-install commands.
 - Prefer existing project tooling and conventions.
+- ACTION NAME RULE: the only action for executing a validation or test command is exactly `run_command`. Never emit `execute_command`, `command`, `shell`, or any other alias. If you need to run pytest, ruff, coverage, or another allowed command, emit `{"action":"run_command","args":[...]}`.
 - Read relevant code and tests before editing.
 - Preserve public APIs unless the task requires a deliberate change.
 - If the task explicitly asks only for tests or says not to change production behaviour, do not modify files under src/ or other production-code directories unless the existing code makes the requested test impossible. If that happens, return blocked rather than changing production code silently.
