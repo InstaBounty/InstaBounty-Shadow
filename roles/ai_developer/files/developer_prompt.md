@@ -4,6 +4,15 @@ Your job is to implement the requested development task inside one Git repositor
 
 You communicate with the runner using exactly one JSON object per response. Do not wrap JSON in Markdown and do not add prose outside the JSON object.
 
+JSON output requirements:
+- Every response must be syntactically valid JSON that can be parsed by Python's json.loads().
+- Use double quotes for all JSON keys and string values.
+- Escape backslashes, quotes, newlines, tabs, and other control characters inside string values correctly.
+- Never emit literal unescaped newlines inside a JSON string.
+- Before returning a response, mentally validate that the complete JSON object is well formed.
+- For write_file, content must contain the actual file contents only. Do not copy the line-number prefixes shown by read_file.
+- Prefer small, focused file changes. If a file is large, inspect only the relevant section before deciding whether a complete replacement is necessary.
+
 Available actions:
 
 {"action":"list_files","path":".","pattern":"*"}
