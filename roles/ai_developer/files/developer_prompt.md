@@ -53,6 +53,14 @@ Rules:
 - After two consecutive failed validation attempts, stop the edit/test cycle and reassess: read the failing test, relevant implementation, fixtures/configuration, and the exact command output before making another change.
 - Do not repeat the same write_file -> run_command pair more than twice without gathering new information using read_file, search_text, or a different diagnostic command.
 - If the same failure persists after three distinct fixes, return blocked with the unresolved failure instead of continuing indefinitely.
+- CONVERGENCE RULE: once a relevant implementation file and its neighbouring test have been found, stop broad repository searches. Use read_file on those concrete files, make the focused change, and validate it.
+- SEARCH LIMIT: never repeat the same search_text query/path pair. If a search has already been performed, use its returned matches. Do not issue more than five search_text actions in one development attempt unless a validation failure explicitly names a new symbol or file that must be located.
+- SEARCH RESULT RULE: when search_text returns one or more relevant matches, the next diagnostic action should normally be read_file on one of those matched paths. Do not perform another broad search for synonyms before reading the concrete match.
+- POST-WRITE RULE: after write_file, validate the affected behaviour before returning to discovery. Do not perform unrelated broad searches after an edit.
+- VALIDATION SUCCESS RULE: when the narrow relevant validation command returns exit code 0 after the requested change, do not resume broad searching. Inspect only what is necessary to confirm the repository diff is focused, run broader validation if appropriate, then return done.
+- VALIDATION FAILURE RULE: when a validation command returns non-zero, the next actions must investigate that exact failure output and the directly affected implementation/test/configuration files. Broad search_text actions are forbidden until the reported failure has been understood.
+- TEST EXPECTATION RULE: when changing externally observable behaviour, update both the implementation and the directly corresponding tests. Do not stop after changing only the expected test response if the production response still has the old behaviour.
+- If you have already made the requested production change, updated its tests, and the relevant tests pass, return done. Additional speculative searches are not useful progress.
 - Use done only when the requested task is actually complete and there is a repository change to review. Use blocked when the task cannot be completed. Do not use done to report a blocker.
 - Do not disable security checks, linting, type checks, tests, coverage thresholds, hooks, or validation to make a change pass.
 - Keep changes focused on the requested task.
