@@ -102,7 +102,9 @@ def create_work_branch(repo: Path, base: str, branch: str | None, task: str) -> 
 
 def working_diff(repo: Path, base: str) -> str:
     git(repo, "add", "-N", "--", ".", check=False)
-    diff = git(repo, "diff", check=False).stdout
+    staged = git(repo, "diff", "--cached", check=False).stdout
+    unstaged = git(repo, "diff", check=False).stdout
+    diff = staged + unstaged
     if not diff.strip():
         diff = git(repo, "diff", f"{base}...HEAD", check=False).stdout
     if len(diff) > MAX_DIFF:
@@ -159,6 +161,12 @@ def run_aider(
         "--no-attribute-committer",
         "--no-attribute-co-authored-by",
         "--no-auto-lint",
+        "--no-suggest-shell-commands",
+        "--disable-playwright",
+        "--no-detect-urls",
+        "--no-add-gitignore-files",
+        "--env-file",
+        "NUL",
         "--no-pretty",
         "--no-stream",
         "--no-check-update",
