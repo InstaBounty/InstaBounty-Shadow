@@ -70,6 +70,21 @@
     src: ai_developer.py
     dest: "{{ ai_developer_install_dir }}\\ai_developer.py"
 
+- name: Verify installed AI developer runner matches role source
+  ansible.windows.win_stat:
+    path: "{{ ai_developer_install_dir }}\\ai_developer.py"
+    checksum_algorithm: sha256
+  register: ai_developer_installed_runner
+
+- name: Validate installed AI developer runner checksum
+  ansible.builtin.assert:
+    that:
+      - ai_developer_installed_runner.stat.exists
+      - ai_developer_installed_runner.stat.checksum == (lookup('ansible.builtin.file', role_path + '/files/ai_developer.py') | hash('sha256'))
+    fail_msg: >-
+      Installed AI developer runner does not match the Ansible role source.
+      Refusing to continue with a stale runtime.
+
 - name: Install AI reviewer system prompt
   ansible.windows.win_copy:
     src: reviewer_prompt.md
@@ -104,4 +119,6 @@
     msg:
       - "Implementation agent: Aider + ollama_chat/{{ ai_developer_model }}"
       - "AI reviewer model: {{ ai_reviewer_model }}"
+      - "AI developer runner version: {{ ai_developer_runner_version }}"
+      - "Installed runner checksum verified against role source."
       - "Run ai-dev --help from a new terminal after provisioning."
