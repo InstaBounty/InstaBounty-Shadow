@@ -20,6 +20,13 @@ DEFAULT_REVIEWER_MODEL = "gemma3:4b"
 DEFAULT_AIDER_COMMAND = "aider"
 PROTECTED_BRANCHES = {"main", "master"}
 MAX_DIFF = 120_000
+HOUSEKEEPING_FILES = {
+    ".gitignore",
+    ".aider.conf.yml",
+    ".aider.model.metadata.json",
+    ".aider.model.settings.yml",
+    ".editorconfig",
+}
 
 
 class AgentError(RuntimeError):
@@ -72,8 +79,7 @@ def ensure_clean(repo: Path) -> None:
     status = git(repo, "status", "--porcelain").stdout.strip()
     if status:
         raise AgentError(
-            "Repository has uncommitted changes. Commit/stash them before starting the AI developer.\n"
-            + status
+            "Repository has uncommitted changes. Commit/stash them before starting the AI developer.\n" + status
         )
 
 
@@ -82,22 +88,27 @@ def slugify(value: str, limit: int = 36) -> str:
     return value[:limit].rstrip("-") or "change"
 
 
-def create_work_branch(repo: Path, base: str, branch: str | None, task: str) -> str:
+def create_work_branch(repo: Path, base: str, branch: str | None, task: str) -> tuple[str, bool]:
     if not base:
         raise AgentError("A base branch is required.")
     git(repo, "show-ref", "--verify", f"refs/heads/{base}")
-    git(repo, "switch", base)
 
     branch_name = branch or f"ai/{slugify(task)}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     if branch_name.lower() in PROTECTED_BRANCHES:
         raise AgentError(f"Refusing to use protected branch: {branch_name}")
     if not (branch_name.startswith("ai/") or branch_name.startswith("feature/")):
         raise AgentError("AI work branches must start with 'ai/' or 'feature/'.")
-    if git(repo, "show-ref", "--verify", f"refs/heads/{branch_name}", check=False).returncode == 0:
-        raise AgentError(f"Branch already exists: {branch_name}")
 
+    exists = git(repo, "show-ref", "--verify", f"refs/heads/{branch_name}", check=False).returncode == 0
+    if exists:
+        if branch is None:
+            raise AgentError(f"Generated AI branch already exists: {branch_name}")
+        git(repo, "switch", branch_name)
+        return branch_name, True
+
+    git(repo, "switch", base)
     git(repo, "switch", "-c", branch_name)
-    return branch_name
+    return branch_name, False
 
 
 def working_diff(repo: Path, base: str) -> str:
@@ -105,11 +116,54 @@ def working_diff(repo: Path, base: str) -> str:
     staged = git(repo, "diff", "--cached", check=False).stdout
     unstaged = git(repo, "diff", check=False).stdout
     diff = staged + unstaged
-    if not diff.strip():
-        diff = git(repo, "diff", f"{base}...HEAD", check=False).stdout
+    committed = git(repo, "diff", f"{base}...HEAD", check=False).stdout
+    if committed.strip():
+        diff = committed + diff
     if len(diff) > MAX_DIFF:
         return diff[:MAX_DIFF] + f"\n... diff truncated at {MAX_DIFF} characters ..."
     return diff
+
+
+def changed_files(repo: Path, base: str) -> list[str]:
+    git(repo, "add", "-N", "--", ".", check=False)
+    paths: set[str] = set()
+    for args in (
+        ("diff", "--name-only", f"{base}...HEAD"),
+        ("diff", "--name-only"),
+        ("diff", "--cached", "--name-only"),
+    ):
+        output = git(repo, *args, check=False).stdout
+        paths.update(line.strip().replace("\\", "/") for line in output.splitlines() if line.strip())
+    return sorted(paths)
+
+
+def repository_file_context(repo: Path, limit: int = 400) -> str:
+    files = git(repo, "ls-files", check=False).stdout.splitlines()
+    visible = files[:limit]
+    suffix = "\n... repository file list truncated ..." if len(files) > limit else ""
+    return "\n".join(visible) + suffix
+
+
+def housekeeping_only_issue(task: str, files: list[str]) -> str | None:
+    if not files:
+        return "No repository changes were produced for a task that requires implementation work."
+    task_lower = task.lower()
+    if "gitignore" in task_lower or ".gitignore" in task_lower or "aider" in task_lower:
+        return None
+    meaningful = [
+        path
+        for path in files
+        if path not in HOUSEKEEPING_FILES
+        and not path.startswith(".aider")
+        and not path.startswith(".vscode/")
+        and not path.startswith(".idea/")
+    ]
+    if meaningful:
+        return None
+    return (
+        "The proposed diff contains only tooling/housekeeping files "
+        f"({', '.join(files)}) and does not implement the requested production/test behaviour."
+    )
 
 
 def detected_test_command(repo: Path) -> str | None:
@@ -228,11 +282,13 @@ def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) 
     install_dir = Path(__file__).resolve().parent
     system_prompt = (install_dir / "reviewer_prompt.md").read_text(encoding="utf-8")
     diff = working_diff(repo, base)
-    if not diff.strip():
+    files = changed_files(repo, base)
+    deterministic_issue = housekeeping_only_issue(task, files)
+    if deterministic_issue:
         return {
             "approved": False,
-            "summary": "No changes were found to review.",
-            "issues": ["No repository diff exists."],
+            "summary": "Quality gate rejected an incomplete diff before model approval.",
+            "issues": [deterministic_issue],
         }
 
     review = ollama_chat(
@@ -240,7 +296,15 @@ def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) 
         model,
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Requested task:\n{task}\n\nProposed diff:\n{diff}"},
+            {
+                "role": "user",
+                "content": (
+                    f"Requested task:\n{task}\n\n"
+                    f"Changed files:\n" + "\n".join(files) + "\n\n"
+                    f"Repository file context:\n{repository_file_context(repo)}\n\n"
+                    f"Proposed diff:\n{diff}"
+                ),
+            },
         ],
     )
     issues = review.get("issues", [])
@@ -265,7 +329,9 @@ def default_commit_message(task: str) -> str:
     return f"feat: {summary[0].lower() + summary[1:]}"
 
 
-def cleanup_no_change_branch(repo: Path, base: str, branch: str) -> None:
+def cleanup_no_change_branch(repo: Path, base: str, branch: str, reused: bool) -> None:
+    if reused:
+        return
     git(repo, "switch", base)
     git(repo, "branch", "-D", branch)
 
@@ -273,8 +339,10 @@ def cleanup_no_change_branch(repo: Path, base: str, branch: str) -> None:
 def command_develop(args: argparse.Namespace) -> int:
     repo = ensure_git_repo(Path(args.repo))
     ensure_clean(repo)
-    branch = create_work_branch(repo, args.base, args.branch, args.task)
+    branch, reused = create_work_branch(repo, args.base, args.branch, args.task)
     print(f"Working branch: {branch}")
+    if reused:
+        print(f"Reusing existing AI branch: {branch}")
 
     test_command = args.test_cmd or detected_test_command(repo)
     return_code = run_aider(
@@ -292,7 +360,7 @@ def command_develop(args: argparse.Namespace) -> int:
         return return_code
 
     if not working_diff(repo, args.base).strip():
-        cleanup_no_change_branch(repo, args.base, branch)
+        cleanup_no_change_branch(repo, args.base, branch, reused)
         print("NO_CHANGES_REQUIRED: Aider completed without repository changes.")
         return 0
 
@@ -309,7 +377,8 @@ def command_develop(args: argparse.Namespace) -> int:
             feedback = "\n".join(f"- {issue}" for issue in review["issues"])
             revision_task = (
                 f"Original task:\n{args.task}\n\n"
-                "An independent reviewer found these blocking issues. Fix only these issues, "
+                "The independent quality gate/reviewer found these blocking issues. "
+                "Fix the implementation so the original requirements are materially satisfied, "
                 f"then run the relevant validation:\n{feedback}"
             )
             return_code = run_aider(
