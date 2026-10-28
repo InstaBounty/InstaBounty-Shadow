@@ -70,17 +70,25 @@
     src: ai_developer.py
     dest: "{{ ai_developer_install_dir }}\\ai_developer.py"
 
-- name: Verify installed AI developer runner matches role source
+- name: Calculate source AI developer runner checksum
+  ansible.builtin.stat:
+    path: "{{ role_path }}/files/ai_developer.py"
+    checksum_algorithm: sha256
+  register: ai_developer_source_runner
+  delegate_to: localhost
+  become: false
+
+- name: Calculate installed AI developer runner checksum
   ansible.windows.win_stat:
     path: "{{ ai_developer_install_dir }}\\ai_developer.py"
+    get_checksum: true
     checksum_algorithm: sha256
   register: ai_developer_installed_runner
 
 - name: Validate installed AI developer runner checksum
   ansible.builtin.assert:
     that:
-      - ai_developer_installed_runner.stat.exists
-      - ai_developer_installed_runner.stat.checksum == (lookup('ansible.builtin.file', role_path + '/files/ai_developer.py') | hash('sha256'))
+      - ai_developer_source_runner.stat.checksum == ai_developer_installed_runner.stat.checksum
     fail_msg: >-
       Installed AI developer runner does not match the Ansible role source.
       Refusing to continue with a stale runtime.
