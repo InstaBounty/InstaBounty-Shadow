@@ -17,7 +17,7 @@ if defined EXPECTED_BRANCH (
     echo AI developer branch invariant: !EXPECTED_BRANCH!
 )
 
-py -3 "{{ ai_developer_install_dir }}\ai_developer.py" develop --model "{{ ai_developer_model }}" --reviewer-model "{{ ai_reviewer_model }}" --ollama-url "{{ ai_developer_ollama_url }}" --aider-command "{{ ai_developer_aider_command }}" --review-passes {{ ai_developer_review_passes }} %*
+py -3 -c "import base64,runpy,sys; p=r'{{ ai_developer_install_dir }}\ai_developer.py'; i=next((n for n,v in enumerate(sys.argv) if v=='--task-base64'),None); i is None or sys.argv.__setitem__(slice(i,i+2),['--task',base64.b64decode(sys.argv[i+1],validate=True).decode('utf-8')]); sys.argv[0]=p; ns=runpy.run_path(p,run_name='ai_developer_bridge'); task=sys.argv[sys.argv.index('--task')+1] if '--task' in sys.argv else ''; task and print(f'Review contract detected: R={len(ns[\"canonical_requirements\"](task))}, F={len(ns[\"github_review_requirements\"](task))}'); raise SystemExit(ns['main']())" develop --model "{{ ai_developer_model }}" --reviewer-model "{{ ai_reviewer_model }}" --ollama-url "{{ ai_developer_ollama_url }}" --aider-command "{{ ai_developer_aider_command }}" --review-passes {{ ai_developer_review_passes }} %*
 set "AI_DEV_EXIT=!ERRORLEVEL!"
 
 if defined EXPECTED_BRANCH (
