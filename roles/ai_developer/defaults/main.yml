@@ -1,5 +1,5 @@
 ---
-ai_developer_model: qwen2.5-coder:7b
+ai_developer_model: qwen3-coder:30b
 ai_reviewer_model: gemma3:4b
 ai_developer_ollama_url: http://127.0.0.1:11434
 ai_developer_install_dir: 'C:\Program Files\InstaBounty\AI Developer'
