@@ -240,15 +240,13 @@ def python_package_name(repo: Path) -> str | None:
     return None
 
 
+def _unit_test_root(repo: Path) -> str:
+    return "tests/unit" if (repo / "tests" / "unit").is_dir() else "tests"
+
+
 def detected_test_command(repo: Path) -> str | None:
-    package = python_package_name(repo)
-    if package is not None:
-        test_root = "tests/unit" if (repo / "tests" / "unit").is_dir() else "tests"
-        return (
-            f"uv run --with pytest-cov pytest {test_root} "
-            f"--cov={package} --cov-report=term-missing "
-            f"--cov-report=json:{COVERAGE_FILE} --cov-fail-under=100"
-        )
+    if python_package_name(repo) is not None:
+        return f"uv run pytest {_unit_test_root(repo)}"
     if (repo / "pnpm-lock.yaml").is_file():
         return "pnpm test"
     if (repo / "package.json").is_file():
@@ -256,6 +254,17 @@ def detected_test_command(repo: Path) -> str | None:
     if (repo / "foundry.toml").is_file():
         return "forge test"
     return None
+
+
+def detected_coverage_command(repo: Path) -> str | None:
+    package = python_package_name(repo)
+    if package is None:
+        return None
+    return (
+        f"uv run --with pytest-cov pytest {_unit_test_root(repo)} "
+        f"--cov={package} --cov-report=term-missing "
+        f"--cov-report=json:{COVERAGE_FILE} --cov-fail-under=100"
+    )
 
 
 def production_python_files(files: list[str]) -> list[str]:
@@ -287,13 +296,20 @@ def coverage_issue(repo: Path, files: list[str]) -> str | None:
     return None
 
 
-def deterministic_quality_issues(repo: Path, task: str, files: list[str]) -> list[str]:
+def deterministic_quality_issues(
+    repo: Path,
+    task: str,
+    files: list[str],
+    *,
+    require_coverage: bool,
+) -> list[str]:
     issues = [
         housekeeping_only_issue(task, files),
         component_test_policy_issue(task, files),
         explicit_unit_test_issue(task, files),
-        coverage_issue(repo, files),
     ]
+    if require_coverage:
+        issues.append(coverage_issue(repo, files))
     return [issue for issue in issues if issue]
 
 
@@ -302,8 +318,8 @@ def coverage_context(repo: Path) -> str:
     return detail
 
 
-def _prepare_validation_artifacts(repo: Path, test_command: str | None) -> None:
-    if test_command and COVERAGE_FILE in test_command:
+def _prepare_validation_artifacts(repo: Path, command: str | None) -> None:
+    if command and COVERAGE_FILE in command:
         (repo / COVERAGE_FILE).unlink(missing_ok=True)
 
 
@@ -381,13 +397,19 @@ def run_aider(
     return return_code
 
 
-def run_validation(repo: Path, test_command: str | None, ollama_url: str) -> subprocess.CompletedProcess[str] | None:
-    if not test_command:
+def run_validation(
+    repo: Path,
+    command: str | None,
+    ollama_url: str,
+    *,
+    stage: str,
+) -> subprocess.CompletedProcess[str] | None:
+    if not command:
         return None
-    _prepare_validation_artifacts(repo, test_command)
-    print(f"Independent validation command: {test_command}")
+    _prepare_validation_artifacts(repo, command)
+    print(f"{stage} validation command: {command}")
     result = subprocess.run(
-        test_command,
+        command,
         cwd=str(repo),
         text=True,
         capture_output=True,
@@ -397,12 +419,13 @@ def run_validation(repo: Path, test_command: str | None, ollama_url: str) -> sub
     )
     combined = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
     if combined:
+        prefix = stage.upper()
         for line in combined.splitlines():
-            print(f"VALIDATION: {line}")
+            print(f"{prefix}: {line}")
     if result.returncode == 0:
-        print("Independent validation passed.")
+        print(f"{stage} validation passed.")
     else:
-        print(f"Independent validation failed with exit code {result.returncode}.")
+        print(f"{stage} validation failed with exit code {result.returncode}.")
     return result
 
 
@@ -484,13 +507,26 @@ def _normalize_review_requirements(
     return requirements, issues
 
 
-def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) -> dict[str, Any]:
+def run_reviewer(
+    repo: Path,
+    task: str,
+    base: str,
+    ollama_url: str,
+    model: str,
+    *,
+    require_coverage: bool,
+) -> dict[str, Any]:
     install_dir = Path(__file__).resolve().parent
     system_prompt = (install_dir / "reviewer_prompt.md").read_text(encoding="utf-8")
     diff = working_diff(repo, base)
     files = changed_files(repo, base)
 
-    deterministic_issues = deterministic_quality_issues(repo, task, files)
+    deterministic_issues = deterministic_quality_issues(
+        repo,
+        task,
+        files,
+        require_coverage=require_coverage,
+    )
     if deterministic_issues:
         return {
             "approved": False,
@@ -498,6 +534,14 @@ def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) 
             "requirements": [],
             "issues": deterministic_issues,
         }
+
+    if require_coverage:
+        coverage_evidence = coverage_context(repo)
+    else:
+        coverage_evidence = (
+            "Deferred until after requirement verification. Coverage is independently enforced "
+            "as a mandatory final gate before commit; do not reject solely because coverage is deferred."
+        )
 
     review = ollama_chat(
         ollama_url,
@@ -509,7 +553,7 @@ def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) 
                 "content": (
                     f"Requested task:\n{task}\n\n"
                     f"Changed files:\n" + "\n".join(files) + "\n\n"
-                    f"Coverage evidence:\n{coverage_context(repo)}\n\n"
+                    f"Coverage evidence:\n{coverage_evidence}\n\n"
                     f"Repository file context:\n{repository_file_context(repo)}\n\n"
                     f"Proposed diff:\n{diff}"
                 ),
@@ -560,12 +604,12 @@ def _development_task(task: str, repo: Path) -> str:
         "Quality requirements:",
         "- Satisfy every explicit requirement in the original task exactly.",
         "- Production-code changes must be covered by unit tests.",
-        "- For Python production-code changes, unit-test coverage must remain at 100%.",
         "- Do not create or modify component tests unless the original task explicitly requests component tests.",
     ]
     if python_package_name(repo) is not None:
         policy.append(
-            "- Use the configured unit-test coverage command and fix every test failure and uncovered line before finishing."
+            "- 100% unit-test coverage is a mandatory final quality gate after the implementation "
+            "has passed functional tests and requirement verification; focus first on correct behaviour and unit tests."
         )
     return f"{task}\n\n" + "\n".join(policy)
 
@@ -573,10 +617,21 @@ def _development_task(task: str, repo: Path) -> str:
 def _revision_task(task: str, reason: str) -> str:
     return (
         f"Original task:\n{task}\n\n"
-        "The independent validation/requirement gate found blocking issues. Fix them while still "
-        "satisfying every original requirement. Maintain 100% unit-test coverage for Python production "
-        "code and do not create or modify component tests unless the original task explicitly requested them.\n\n"
+        "The independent functional validation/requirement gate found blocking issues. Fix them while still "
+        "satisfying every original requirement. Do not create or modify component tests unless the original "
+        "task explicitly requested them.\n\n"
         f"Blocking evidence:\n{reason}"
+    )
+
+
+def _coverage_revision_task(task: str, result: subprocess.CompletedProcess[str]) -> str:
+    return (
+        f"Original task:\n{task}\n\n"
+        "The implementation has already passed functional unit tests and requirement verification. "
+        "The final 100% unit-test coverage gate failed. Do not redesign the feature or add component tests. "
+        "Add or adjust unit tests only as needed to cover the remaining production lines while preserving "
+        "the approved behaviour.\n\n"
+        f"Coverage failure evidence:\n{_validation_feedback(result)}"
     )
 
 
@@ -589,10 +644,12 @@ def command_develop(args: argparse.Namespace) -> int:
         print(f"Reusing existing AI branch: {branch}")
 
     test_command = args.test_cmd or detected_test_command(repo)
+    coverage_command = detected_coverage_command(repo)
     max_passes = max(1, args.review_passes)
     pass_number = 1
     current_task = _development_task(args.task, repo)
     review: dict[str, Any] | None = None
+    coverage_passed = coverage_command is None
 
     while pass_number <= max_passes:
         return_code = run_aider(
@@ -614,39 +671,82 @@ def command_develop(args: argparse.Namespace) -> int:
             print("NO_CHANGES_REQUIRED: Aider completed without repository changes.")
             return 0
 
-        validation = run_validation(repo, test_command, args.ollama_url)
-        if validation is not None and validation.returncode != 0:
+        functional = run_validation(
+            repo,
+            test_command,
+            args.ollama_url,
+            stage="Functional",
+        )
+        if functional is not None and functional.returncode != 0:
             if pass_number >= max_passes:
-                print("Independent validation did not pass after the final Aider pass.", file=sys.stderr)
-                return validation.returncode or 1
-            current_task = _revision_task(args.task, _validation_feedback(validation))
+                print("Functional validation did not pass after the final Aider pass.", file=sys.stderr)
+                return functional.returncode or 1
+            current_task = _revision_task(args.task, _validation_feedback(functional))
             pass_number += 1
             continue
 
         print(f"[review {pass_number}/{max_passes}] asking {args.reviewer_model}...")
-        review = run_reviewer(repo, args.task, args.base, args.ollama_url, args.reviewer_model)
+        review = run_reviewer(
+            repo,
+            args.task,
+            args.base,
+            args.ollama_url,
+            args.reviewer_model,
+            require_coverage=False,
+        )
         print(f"Reviewer summary: {review['summary']}")
         for issue in review.get("issues", []):
             print(f"Reviewer issue: {issue}")
 
-        if review["approved"]:
-            print("Review approved")
+        if not review["approved"]:
+            if pass_number >= max_passes:
+                print("Reviewer did not approve the change.", file=sys.stderr)
+                return 2
+            feedback = "\n".join(f"- {issue}" for issue in review.get("issues", []))
+            current_task = _revision_task(args.task, feedback or review["summary"])
+            pass_number += 1
+            continue
+
+        print("Review approved")
+
+        coverage = run_validation(
+            repo,
+            coverage_command,
+            args.ollama_url,
+            stage="Coverage",
+        )
+        if coverage is None or coverage.returncode == 0:
+            coverage_passed = True
             break
 
         if pass_number >= max_passes:
-            print("Reviewer did not approve the change.", file=sys.stderr)
-            return 2
+            print("Coverage validation did not pass after the final Aider pass.", file=sys.stderr)
+            return coverage.returncode or 1
 
-        feedback = "\n".join(f"- {issue}" for issue in review.get("issues", []))
-        current_task = _revision_task(args.task, feedback or review["summary"])
+        current_task = _coverage_revision_task(args.task, coverage)
         pass_number += 1
 
     if not review or not review["approved"]:
         print("Reviewer did not approve the change.", file=sys.stderr)
         return 2
+    if not coverage_passed:
+        print("100% unit-test coverage was not verified.", file=sys.stderr)
+        return 1
+
+    final_files = changed_files(repo, args.base)
+    final_quality_issues = deterministic_quality_issues(
+        repo,
+        args.task,
+        final_files,
+        require_coverage=True,
+    )
+    if final_quality_issues:
+        for issue in final_quality_issues:
+            print(f"Final quality issue: {issue}", file=sys.stderr)
+        return 2
 
     if args.no_commit:
-        print("Review approved. Changes left uncommitted because --no-commit was supplied.")
+        print("Review approved and final coverage gate passed. Changes left uncommitted because --no-commit was supplied.")
         return 0
 
     git(repo, "add", "-A")
@@ -666,7 +766,14 @@ def command_develop(args: argparse.Namespace) -> int:
 
 def command_review(args: argparse.Namespace) -> int:
     repo = ensure_git_repo(Path(args.repo))
-    review = run_reviewer(repo, args.task, args.base, args.ollama_url, args.reviewer_model)
+    review = run_reviewer(
+        repo,
+        args.task,
+        args.base,
+        args.ollama_url,
+        args.reviewer_model,
+        require_coverage=True,
+    )
     print(json.dumps(review, indent=2, ensure_ascii=False))
     return 0 if review["approved"] else 2
 
