@@ -145,17 +145,25 @@ def repository_file_context(repo: Path, limit: int = 400) -> str:
     return "\n".join(visible) + suffix
 
 
-def canonical_requirements(task: str) -> list[dict[str, str]]:
-    """Extract stable R1..Rn requirements from numbered task items.
+def split_task_review_feedback(task: str) -> tuple[str, str]:
+    """Separate Gina-appended GitHub review feedback from the immutable original task."""
+    lines = task.splitlines()
+    for index, raw_line in enumerate(lines):
+        normalized = raw_line.strip().lower()
+        if "github" in normalized and "review feedback" in normalized:
+            original = "\n".join(lines[:index]).strip()
+            feedback = "\n".join(lines[index + 1 :]).strip()
+            return original or task.strip(), feedback
+    return task.strip(), ""
 
-    Continuation lines, including indented bullets, remain attached to the numbered
-    requirement that introduced them. If the task has no numbered requirements,
-    the complete task becomes R1 so the reviewer still has an immutable contract.
-    """
+
+def canonical_requirements(task: str) -> list[dict[str, str]]:
+    """Extract stable R1..Rn requirements from the original task only."""
+    original_task, _ = split_task_review_feedback(task)
     requirements: list[str] = []
     current: list[str] = []
 
-    for raw_line in task.splitlines():
+    for raw_line in original_task.splitlines():
         match = re.match(r"^\s*\d+[.)]\s+(\S.*)$", raw_line)
         if match:
             if current:
@@ -169,21 +177,82 @@ def canonical_requirements(task: str) -> list[dict[str, str]]:
         requirements.append("\n".join(current).strip())
 
     if not requirements:
-        text = task.strip()
+        text = original_task.strip()
         if text:
             requirements = [text]
 
     return [{"id": f"R{index}", "text": text} for index, text in enumerate(requirements, start=1)]
 
 
+def github_review_requirements(task: str) -> list[dict[str, str]]:
+    """Extract active GitHub review feedback as stable F1..Fn requirements."""
+    _, feedback = split_task_review_feedback(task)
+    if not feedback:
+        return []
+
+    items: list[str] = []
+    current: list[str] = []
+    saw_structured_item = False
+    for raw_line in feedback.splitlines():
+        match = re.match(r"^\s*(?:[-*•]|\d+[.)])\s+(\S.*)$", raw_line)
+        if match:
+            saw_structured_item = True
+            if current:
+                items.append("\n".join(current).strip())
+            current = [match.group(1).strip()]
+            continue
+        if current and raw_line.strip():
+            current.append(raw_line.strip())
+
+    if current:
+        items.append("\n".join(current).strip())
+    if not saw_structured_item:
+        items = [feedback.strip()]
+
+    return [{"id": f"F{index}", "text": text} for index, text in enumerate(items, start=1) if text]
+
+
+def review_requirements(task: str) -> list[dict[str, str]]:
+    return [*canonical_requirements(task), *github_review_requirements(task)]
+
+
 def requirement_checklist(task: str) -> str:
-    return "\n".join(f"{item['id']}: {item['text']}" for item in canonical_requirements(task))
+    return "\n".join(f"{item['id']}: {item['text']}" for item in review_requirements(task))
+
+
+def review_feedback_removal_issues(task: str, files: list[str]) -> list[str]:
+    """Deterministically enforce explicit review requests to remove/revert file changes."""
+    issues: list[str] = []
+    removal_terms = (
+        "remove",
+        "removed",
+        "revert",
+        "restore",
+        "drop",
+        "unrelated",
+        "do not modify",
+        "should not be changed",
+    )
+    for item in github_review_requirements(task):
+        lowered = item["text"].lower()
+        if not any(term in lowered for term in removal_terms):
+            continue
+        for path in files:
+            normalized = path.lower()
+            basename = Path(path).name.lower()
+            if normalized in lowered or basename in lowered:
+                issues.append(
+                    f"GitHub review feedback {item['id']} requires removing or reverting changes to "
+                    f"{path}, but that file is still present in the proposed diff."
+                )
+    return issues
 
 
 def housekeeping_only_issue(task: str, files: list[str]) -> str | None:
     if not files:
         return "No repository changes were produced for a task that requires implementation work."
-    task_lower = task.lower()
+    original_task, _ = split_task_review_feedback(task)
+    task_lower = original_task.lower()
     if "gitignore" in task_lower or ".gitignore" in task_lower or "aider" in task_lower:
         return None
     meaningful = [
@@ -203,7 +272,8 @@ def housekeeping_only_issue(task: str, files: list[str]) -> str | None:
 
 
 def _task_explicitly_requests_component_tests(task: str) -> bool:
-    lowered = task.lower()
+    original_task, _ = split_task_review_feedback(task)
+    lowered = original_task.lower()
     return "component test" in lowered or "component tests" in lowered
 
 
@@ -243,7 +313,8 @@ def component_test_policy_issue(task: str, files: list[str]) -> str | None:
 
 
 def explicit_unit_test_issue(task: str, files: list[str]) -> str | None:
-    lowered = task.lower()
+    original_task, _ = split_task_review_feedback(task)
+    lowered = original_task.lower()
     requires_unit_tests = bool(
         re.search(r"\b(add|create|write|update)\b.{0,30}\bunit tests?\b", lowered)
         or re.search(r"\bunit tests?\b.{0,30}\b(verif|cover|assert)", lowered)
@@ -353,7 +424,9 @@ def deterministic_quality_issues(
     ]
     if require_coverage:
         issues.append(coverage_issue(repo, files))
-    return [issue for issue in issues if issue]
+    normalized = [issue for issue in issues if issue]
+    normalized.extend(review_feedback_removal_issues(task, files))
+    return normalized
 
 
 def coverage_context(repo: Path) -> str:
@@ -576,7 +649,7 @@ def run_reviewer(
     system_prompt = (install_dir / "reviewer_prompt.md").read_text(encoding="utf-8")
     diff = working_diff(repo, base)
     files = changed_files(repo, base)
-    requirements = canonical_requirements(task)
+    requirements = review_requirements(task)
 
     deterministic_issues = deterministic_quality_issues(
         repo,
@@ -600,6 +673,8 @@ def run_reviewer(
             "as a mandatory final gate before commit; do not reject solely because coverage is deferred."
         )
 
+    original_task, review_feedback = split_task_review_feedback(task)
+    review_feedback_context = review_feedback or "No active GitHub review feedback."
     review = ollama_chat(
         ollama_url,
         model,
@@ -608,8 +683,10 @@ def run_reviewer(
             {
                 "role": "user",
                 "content": (
-                    f"Requested task:\n{task}\n\n"
-                    f"Canonical requirement checklist:\n{requirement_checklist(task)}\n\n"
+                    f"Original requested task:\n{original_task}\n\n"
+                    f"Active GitHub review feedback:\n{review_feedback_context}\n\n"
+                    f"Review contract checklist (R*=original task, F*=GitHub feedback):\n"
+                    f"{requirement_checklist(task)}\n\n"
                     f"Changed files:\n" + "\n".join(files) + "\n\n"
                     f"Coverage evidence:\n{coverage_evidence}\n\n"
                     f"Repository file context:\n{repository_file_context(repo)}\n\n"
@@ -642,7 +719,8 @@ def run_reviewer(
 
 
 def default_commit_message(task: str) -> str:
-    summary = re.sub(r"\s+", " ", task).strip().rstrip(".")
+    original_task, _ = split_task_review_feedback(task)
+    summary = re.sub(r"\s+", " ", original_task).strip().rstrip(".")
     if len(summary) > 65:
         summary = summary[:65].rstrip()
     if not summary:
@@ -661,32 +739,33 @@ def _development_task(task: str, repo: Path) -> str:
     policy = [
         "Quality requirements:",
         "- Satisfy every explicit requirement in the original task exactly.",
+        "- Treat every active GitHub review-feedback item as a blocking requirement that must be resolved.",
         "- Production-code changes must be covered by unit tests.",
         "- Do not create or modify component tests unless the original task explicitly requests component tests.",
-        "- The reviewer will verify each numbered requirement using immutable R1..Rn IDs; do not omit or substitute requirements.",
+        "- The reviewer verifies immutable R1..Rn task IDs and F1..Fn review-feedback IDs; do not omit or substitute either set.",
     ]
     if python_package_name(repo) is not None:
         policy.append(
             "- 100% unit-test coverage is a mandatory final quality gate after the implementation "
             "has passed functional tests and requirement verification; focus first on correct behaviour and unit tests."
         )
-    return f"{task}\n\nCanonical requirement checklist:\n{requirement_checklist(task)}\n\n" + "\n".join(policy)
+    return f"{task}\n\nReview contract checklist:\n{requirement_checklist(task)}\n\n" + "\n".join(policy)
 
 
 def _revision_task(task: str, reason: str) -> str:
     return (
-        f"Original task:\n{task}\n\n"
-        f"Canonical requirement checklist:\n{requirement_checklist(task)}\n\n"
-        "The independent functional validation/requirement gate found blocking issues. Fix them while still "
-        "satisfying every original requirement. Do not create or modify component tests unless the original "
-        "task explicitly requested them.\n\n"
+        f"Original task and active GitHub review feedback:\n{task}\n\n"
+        f"Review contract checklist:\n{requirement_checklist(task)}\n\n"
+        "The independent functional validation/review gate found blocking issues. Fix them while still "
+        "satisfying every R* original-task requirement and every F* GitHub-feedback requirement. "
+        "Do not create or modify component tests unless the original task explicitly requested them.\n\n"
         f"Blocking evidence:\n{reason}"
     )
 
 
 def _coverage_revision_task(task: str, result: subprocess.CompletedProcess[str]) -> str:
     return (
-        f"Original task:\n{task}\n\n"
+        f"Original task and active GitHub review feedback:\n{task}\n\n"
         "The implementation has already passed functional unit tests and requirement verification. "
         "The final 100% unit-test coverage gate failed. Do not redesign the feature or add component tests. "
         "Add or adjust unit tests only as needed to cover the remaining production lines while preserving "
@@ -737,6 +816,24 @@ def command_develop(args: argparse.Namespace) -> int:
                 print("Functional validation did not pass after the final Aider pass.", file=sys.stderr)
                 return functional.returncode or 1
             current_task = _revision_task(args.task, _validation_feedback(functional))
+            pass_number += 1
+            continue
+
+        files = changed_files(repo, args.base)
+        deterministic_issues = deterministic_quality_issues(
+            repo,
+            args.task,
+            files,
+            require_coverage=False,
+        )
+        if deterministic_issues:
+            for issue in deterministic_issues:
+                print(f"Deterministic review issue: {issue}")
+            if pass_number >= max_passes:
+                print("Deterministic review gate did not pass after the final Aider pass.", file=sys.stderr)
+                return 2
+            feedback = "\n".join(f"- {issue}" for issue in deterministic_issues)
+            current_task = _revision_task(args.task, feedback)
             pass_number += 1
             continue
 
