@@ -1,4 +1,5 @@
 @echo off
 set "AIDER_EDIT_FORMAT=whole"
 set "AIDER_FANCY_INPUT=false"
+echo AI developer runner version: {{ ai_developer_runner_version }}
 py -3 "{{ ai_developer_install_dir }}\ai_developer.py" develop --model "{{ ai_developer_model }}" --reviewer-model "{{ ai_reviewer_model }}" --ollama-url "{{ ai_developer_ollama_url }}" --aider-command "{{ ai_developer_aider_command }}" --review-passes {{ ai_developer_review_passes }} %*
