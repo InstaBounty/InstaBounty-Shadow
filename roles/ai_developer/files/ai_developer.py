@@ -152,7 +152,7 @@ def run_aider(
         f"ollama_chat/{model}",
         "--message",
         task,
-        "--yes",
+        "--yes-always",
         "--no-auto-commits",
         "--no-dirty-commits",
         "--no-attribute-author",
