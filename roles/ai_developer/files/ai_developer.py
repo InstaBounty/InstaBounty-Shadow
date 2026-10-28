@@ -11,15 +11,17 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tomllib
 from typing import Any
 from urllib import error, request
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
-DEFAULT_DEVELOPER_MODEL = "qwen2.5-coder:7b"
+DEFAULT_DEVELOPER_MODEL = "qwen3-coder:30b"
 DEFAULT_REVIEWER_MODEL = "gemma3:4b"
 DEFAULT_AIDER_COMMAND = "aider"
 PROTECTED_BRANCHES = {"main", "master"}
 MAX_DIFF = 120_000
+COVERAGE_FILE = "coverage.json"
 HOUSEKEEPING_FILES = {
     ".gitignore",
     ".aider.conf.yml",
@@ -166,9 +168,88 @@ def housekeeping_only_issue(task: str, files: list[str]) -> str | None:
     )
 
 
+def _task_explicitly_requests_component_tests(task: str) -> bool:
+    lowered = task.lower()
+    return "component test" in lowered or "component tests" in lowered
+
+
+def _is_component_test_file(path: str) -> bool:
+    normalized = path.lower().replace("\\", "/")
+    return (
+        "/component/" in f"/{normalized}/"
+        or normalized.startswith("tests/component/")
+        or normalized.startswith("features/")
+        or normalized.endswith(".feature")
+    )
+
+
+def _is_unit_test_file(path: str) -> bool:
+    normalized = path.lower().replace("\\", "/")
+    if _is_component_test_file(normalized):
+        return False
+    return (
+        normalized.startswith("tests/unit/")
+        or normalized.startswith("test/")
+        or normalized.startswith("tests/")
+        or "/test_" in normalized
+        or normalized.endswith("_test.py")
+    )
+
+
+def component_test_policy_issue(task: str, files: list[str]) -> str | None:
+    if _task_explicitly_requests_component_tests(task):
+        return None
+    component_changes = [path for path in files if _is_component_test_file(path)]
+    if not component_changes:
+        return None
+    return (
+        "Component-test files were changed even though the original task did not explicitly request "
+        f"component tests: {', '.join(component_changes)}."
+    )
+
+
+def explicit_unit_test_issue(task: str, files: list[str]) -> str | None:
+    lowered = task.lower()
+    if _task_explicitly_requests_component_tests(task):
+        return None
+    requires_unit_tests = bool(
+        re.search(r"\b(add|create|write|update)\b.{0,30}\bunit tests?\b", lowered)
+        or re.search(r"\bunit tests?\b.{0,30}\b(verif|cover|assert)", lowered)
+        or re.search(r"\btests?\s+verifying\b", lowered)
+    )
+    if not requires_unit_tests:
+        return None
+    if any(_is_unit_test_file(path) for path in files):
+        return None
+    return "The task explicitly requires unit tests, but no unit-test file is present in the proposed changes."
+
+
+def python_package_name(repo: Path) -> str | None:
+    pyproject = repo / "pyproject.toml"
+    if not pyproject.is_file():
+        return None
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    module_name = data.get("tool", {}).get("uv", {}).get("build-backend", {}).get("module-name")
+    if isinstance(module_name, str) and module_name.strip():
+        return module_name.strip().split(".", 1)[0]
+    project_name = data.get("project", {}).get("name")
+    if isinstance(project_name, str) and project_name.strip():
+        return project_name.strip().replace("-", "_")
+    return None
+
+
 def detected_test_command(repo: Path) -> str | None:
-    if (repo / "pyproject.toml").is_file():
-        return "uv run pytest"
+    package = python_package_name(repo)
+    if package is not None:
+        test_root = "tests/unit" if (repo / "tests" / "unit").is_dir() else "tests"
+        return (
+            f"uv run --with pytest-cov pytest {test_root} "
+            f"--cov={package} --cov-report=term-missing "
+            f"--cov-report=json:{COVERAGE_FILE} --cov-fail-under=100"
+        )
     if (repo / "pnpm-lock.yaml").is_file():
         return "pnpm test"
     if (repo / "package.json").is_file():
@@ -176,6 +257,55 @@ def detected_test_command(repo: Path) -> str | None:
     if (repo / "foundry.toml").is_file():
         return "forge test"
     return None
+
+
+def production_python_files(files: list[str]) -> list[str]:
+    return [path for path in files if path.startswith("src/") and path.endswith(".py")]
+
+
+def coverage_summary(repo: Path) -> tuple[float | None, str]:
+    coverage_path = repo / COVERAGE_FILE
+    if not coverage_path.is_file():
+        return None, f"{COVERAGE_FILE} was not produced."
+    try:
+        data = json.loads(coverage_path.read_text(encoding="utf-8"))
+        percentage = float(data["totals"]["percent_covered"])
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None, f"{COVERAGE_FILE} could not be parsed."
+    return percentage, f"Unit-test code coverage: {percentage:.2f}%."
+
+
+def coverage_issue(repo: Path, files: list[str]) -> str | None:
+    production_files = production_python_files(files)
+    if not production_files:
+        return None
+    percentage, detail = coverage_summary(repo)
+    if percentage is None or percentage < 100.0:
+        return (
+            f"Python production files changed ({', '.join(production_files)}), but {detail} "
+            "100% unit-test coverage is required."
+        )
+    return None
+
+
+def deterministic_quality_issues(repo: Path, task: str, files: list[str]) -> list[str]:
+    issues = [
+        housekeeping_only_issue(task, files),
+        component_test_policy_issue(task, files),
+        explicit_unit_test_issue(task, files),
+        coverage_issue(repo, files),
+    ]
+    return [issue for issue in issues if issue]
+
+
+def coverage_context(repo: Path) -> str:
+    _, detail = coverage_summary(repo)
+    return detail
+
+
+def _prepare_validation_artifacts(repo: Path, test_command: str | None) -> None:
+    if test_command and COVERAGE_FILE in test_command:
+        (repo / COVERAGE_FILE).unlink(missing_ok=True)
 
 
 def aider_environment(ollama_url: str) -> dict[str, str]:
@@ -202,6 +332,7 @@ def run_aider(
     pass_total: int,
 ) -> int:
     print(f"[aider {pass_number}/{pass_total}] implementing with {model}...")
+    _prepare_validation_artifacts(repo, test_command)
     command = [
         aider_command,
         "--model",
@@ -278,17 +409,46 @@ def ollama_chat(url: str, model: str, messages: list[dict[str, str]], timeout: i
     return parsed
 
 
+def _normalize_review_requirements(review: dict[str, Any]) -> tuple[list[dict[str, str | bool]], list[str]]:
+    raw_requirements = review.get("requirements")
+    if not isinstance(raw_requirements, list) or not raw_requirements:
+        return [], ["Reviewer did not provide requirement-by-requirement verification."]
+
+    requirements: list[dict[str, str | bool]] = []
+    issues: list[str] = []
+    for index, item in enumerate(raw_requirements, start=1):
+        if not isinstance(item, dict):
+            issues.append(f"Reviewer requirement {index} is malformed.")
+            continue
+        requirement = str(item.get("requirement", "")).strip()
+        evidence = str(item.get("evidence", "")).strip()
+        satisfied = item.get("satisfied") is True
+        if not requirement:
+            issues.append(f"Reviewer requirement {index} has no requirement text.")
+        if not evidence:
+            issues.append(f"Reviewer requirement {index} has no evidence.")
+        if not satisfied:
+            issues.append(
+                f"Requirement not satisfied: {requirement or f'requirement {index}'}. "
+                f"{evidence or 'No supporting evidence was supplied.'}"
+            )
+        requirements.append({"requirement": requirement, "satisfied": satisfied, "evidence": evidence})
+    return requirements, issues
+
+
 def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) -> dict[str, Any]:
     install_dir = Path(__file__).resolve().parent
     system_prompt = (install_dir / "reviewer_prompt.md").read_text(encoding="utf-8")
     diff = working_diff(repo, base)
     files = changed_files(repo, base)
-    deterministic_issue = housekeeping_only_issue(task, files)
-    if deterministic_issue:
+
+    deterministic_issues = deterministic_quality_issues(repo, task, files)
+    if deterministic_issues:
         return {
             "approved": False,
-            "summary": "Quality gate rejected an incomplete diff before model approval.",
-            "issues": [deterministic_issue],
+            "summary": "Deterministic quality gate rejected the proposed changes.",
+            "requirements": [],
+            "issues": deterministic_issues,
         }
 
     review = ollama_chat(
@@ -301,23 +461,34 @@ def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) 
                 "content": (
                     f"Requested task:\n{task}\n\n"
                     f"Changed files:\n" + "\n".join(files) + "\n\n"
+                    f"Coverage evidence:\n{coverage_context(repo)}\n\n"
                     f"Repository file context:\n{repository_file_context(repo)}\n\n"
                     f"Proposed diff:\n{diff}"
                 ),
             },
         ],
     )
-    issues = review.get("issues", [])
-    if not isinstance(issues, list):
-        issues = [str(issues)]
-    normalized = [str(issue).strip() for issue in issues if str(issue).strip()]
-    approved = review.get("approved") is True
+
+    raw_issues = review.get("issues", [])
+    if not isinstance(raw_issues, list):
+        raw_issues = [str(raw_issues)]
+    normalized_issues = [str(issue).strip() for issue in raw_issues if str(issue).strip()]
+
+    requirements, requirement_issues = _normalize_review_requirements(review)
+    normalized_issues.extend(requirement_issues)
+
+    approved = review.get("approved") is True and not normalized_issues
     summary = str(review.get("summary", "")).strip() or (
         "Approved." if approved else "Reviewer found a blocking issue."
     )
-    if not approved and not normalized:
-        normalized = ["Reviewer rejected the change without an actionable issue."]
-    return {"approved": approved, "summary": summary, "issues": normalized}
+    if not approved and not normalized_issues:
+        normalized_issues = ["Reviewer rejected the change without an actionable issue."]
+    return {
+        "approved": approved,
+        "summary": summary,
+        "requirements": requirements,
+        "issues": normalized_issues,
+    }
 
 
 def default_commit_message(task: str) -> str:
@@ -336,6 +507,21 @@ def cleanup_no_change_branch(repo: Path, base: str, branch: str, reused: bool) -
     git(repo, "branch", "-D", branch)
 
 
+def _development_task(task: str, repo: Path) -> str:
+    policy = [
+        "Quality requirements:",
+        "- Satisfy every explicit requirement in the original task exactly.",
+        "- Production-code changes must be covered by unit tests.",
+        "- For Python production-code changes, unit-test coverage must remain at 100%.",
+        "- Do not create or modify component tests unless the original task explicitly requests component tests.",
+    ]
+    if python_package_name(repo) is not None:
+        policy.append(
+            "- Use the configured unit-test coverage command and fix every uncovered line before finishing."
+        )
+    return f"{task}\n\n" + "\n".join(policy)
+
+
 def command_develop(args: argparse.Namespace) -> int:
     repo = ensure_git_repo(Path(args.repo))
     ensure_clean(repo)
@@ -345,9 +531,10 @@ def command_develop(args: argparse.Namespace) -> int:
         print(f"Reusing existing AI branch: {branch}")
 
     test_command = args.test_cmd or detected_test_command(repo)
+    implementation_task = _development_task(args.task, repo)
     return_code = run_aider(
         repo,
-        task=args.task,
+        task=implementation_task,
         model=args.model,
         ollama_url=args.ollama_url,
         aider_command=args.aider_command,
@@ -369,6 +556,8 @@ def command_develop(args: argparse.Namespace) -> int:
         print(f"[review {review_pass}/{args.review_passes}] asking {args.reviewer_model}...")
         review = run_reviewer(repo, args.task, args.base, args.ollama_url, args.reviewer_model)
         print(f"Reviewer summary: {review['summary']}")
+        for issue in review.get("issues", []):
+            print(f"Reviewer issue: {issue}")
         if review["approved"]:
             print("Review approved")
             break
@@ -377,9 +566,11 @@ def command_develop(args: argparse.Namespace) -> int:
             feedback = "\n".join(f"- {issue}" for issue in review["issues"])
             revision_task = (
                 f"Original task:\n{args.task}\n\n"
-                "The independent quality gate/reviewer found these blocking issues. "
-                "Fix the implementation so the original requirements are materially satisfied, "
-                f"then run the relevant validation:\n{feedback}"
+                "The independent requirement-verification/quality gate found these blocking issues. "
+                "Fix the implementation so every original requirement is materially satisfied. "
+                "Maintain 100% unit-test coverage for Python production code and do not create or "
+                "modify component tests unless the original task explicitly requested them.\n"
+                f"{feedback}"
             )
             return_code = run_aider(
                 repo,
