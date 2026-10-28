@@ -6,4 +6,4 @@ ai_developer_install_dir: 'C:\Program Files\InstaBounty\AI Developer'
 ai_developer_bin_dir: 'C:\Program Files\InstaBounty\bin'
 ai_developer_aider_command: 'C:\Program Files\InstaBounty\bin\aider.exe'
 ai_developer_aider_package: aider-chat@latest
-ai_developer_review_passes: 2
+ai_developer_review_passes: 4
