@@ -21,6 +21,7 @@ DEFAULT_REVIEWER_MODEL = "gemma3:4b"
 DEFAULT_AIDER_COMMAND = "aider"
 PROTECTED_BRANCHES = {"main", "master"}
 MAX_DIFF = 120_000
+MAX_VALIDATION_FEEDBACK = 16_000
 COVERAGE_FILE = "coverage.json"
 HOUSEKEEPING_FILES = {
     ".gitignore",
@@ -210,8 +211,6 @@ def component_test_policy_issue(task: str, files: list[str]) -> str | None:
 
 def explicit_unit_test_issue(task: str, files: list[str]) -> str | None:
     lowered = task.lower()
-    if _task_explicitly_requests_component_tests(task):
-        return None
     requires_unit_tests = bool(
         re.search(r"\b(add|create|write|update)\b.{0,30}\bunit tests?\b", lowered)
         or re.search(r"\bunit tests?\b.{0,30}\b(verif|cover|assert)", lowered)
@@ -332,7 +331,6 @@ def run_aider(
     pass_total: int,
 ) -> int:
     print(f"[aider {pass_number}/{pass_total}] implementing with {model}...")
-    _prepare_validation_artifacts(repo, test_command)
     command = [
         aider_command,
         "--model",
@@ -383,6 +381,39 @@ def run_aider(
     return return_code
 
 
+def run_validation(repo: Path, test_command: str | None, ollama_url: str) -> subprocess.CompletedProcess[str] | None:
+    if not test_command:
+        return None
+    _prepare_validation_artifacts(repo, test_command)
+    print(f"Independent validation command: {test_command}")
+    result = subprocess.run(
+        test_command,
+        cwd=str(repo),
+        text=True,
+        capture_output=True,
+        timeout=600,
+        shell=True,
+        env=aider_environment(ollama_url),
+    )
+    combined = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if combined:
+        for line in combined.splitlines():
+            print(f"VALIDATION: {line}")
+    if result.returncode == 0:
+        print("Independent validation passed.")
+    else:
+        print(f"Independent validation failed with exit code {result.returncode}.")
+    return result
+
+
+def _validation_feedback(result: subprocess.CompletedProcess[str]) -> str:
+    combined = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if len(combined) > MAX_VALIDATION_FEEDBACK:
+        combined = combined[-MAX_VALIDATION_FEEDBACK:]
+        combined = f"... validation output truncated ...\n{combined}"
+    return combined or f"Validation failed with exit code {result.returncode}."
+
+
 def ollama_chat(url: str, model: str, messages: list[dict[str, str]], timeout: int = 600) -> dict[str, Any]:
     payload = json.dumps(
         {"model": model, "messages": messages, "stream": False, "format": "json"}
@@ -409,13 +440,30 @@ def ollama_chat(url: str, model: str, messages: list[dict[str, str]], timeout: i
     return parsed
 
 
-def _normalize_review_requirements(review: dict[str, Any]) -> tuple[list[dict[str, str | bool]], list[str]]:
+def _explicit_requirement_count(task: str) -> int:
+    numbered = re.findall(r"(?m)^\s*\d+[.)]\s+\S", task)
+    if numbered:
+        return len(numbered)
+    bullets = re.findall(r"(?m)^\s*[-*]\s+\S", task)
+    return len(bullets)
+
+
+def _normalize_review_requirements(
+    review: dict[str, Any], task: str
+) -> tuple[list[dict[str, str | bool]], list[str]]:
     raw_requirements = review.get("requirements")
     if not isinstance(raw_requirements, list) or not raw_requirements:
         return [], ["Reviewer did not provide requirement-by-requirement verification."]
 
     requirements: list[dict[str, str | bool]] = []
     issues: list[str] = []
+    expected = _explicit_requirement_count(task)
+    if expected and len(raw_requirements) < expected:
+        issues.append(
+            f"Reviewer verified only {len(raw_requirements)} requirement(s), but the task contains "
+            f"at least {expected} explicit requirement(s)."
+        )
+
     for index, item in enumerate(raw_requirements, start=1):
         if not isinstance(item, dict):
             issues.append(f"Reviewer requirement {index} is malformed.")
@@ -474,7 +522,7 @@ def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) 
         raw_issues = [str(raw_issues)]
     normalized_issues = [str(issue).strip() for issue in raw_issues if str(issue).strip()]
 
-    requirements, requirement_issues = _normalize_review_requirements(review)
+    requirements, requirement_issues = _normalize_review_requirements(review, task)
     normalized_issues.extend(requirement_issues)
 
     approved = review.get("approved") is True and not normalized_issues
@@ -517,9 +565,19 @@ def _development_task(task: str, repo: Path) -> str:
     ]
     if python_package_name(repo) is not None:
         policy.append(
-            "- Use the configured unit-test coverage command and fix every uncovered line before finishing."
+            "- Use the configured unit-test coverage command and fix every test failure and uncovered line before finishing."
         )
     return f"{task}\n\n" + "\n".join(policy)
+
+
+def _revision_task(task: str, reason: str) -> str:
+    return (
+        f"Original task:\n{task}\n\n"
+        "The independent validation/requirement gate found blocking issues. Fix them while still "
+        "satisfying every original requirement. Maintain 100% unit-test coverage for Python production "
+        "code and do not create or modify component tests unless the original task explicitly requested them.\n\n"
+        f"Blocking evidence:\n{reason}"
+    )
 
 
 def command_develop(args: argparse.Namespace) -> int:
@@ -531,60 +589,57 @@ def command_develop(args: argparse.Namespace) -> int:
         print(f"Reusing existing AI branch: {branch}")
 
     test_command = args.test_cmd or detected_test_command(repo)
-    implementation_task = _development_task(args.task, repo)
-    return_code = run_aider(
-        repo,
-        task=implementation_task,
-        model=args.model,
-        ollama_url=args.ollama_url,
-        aider_command=args.aider_command,
-        test_command=test_command,
-        pass_number=1,
-        pass_total=args.review_passes,
-    )
-    if return_code != 0:
-        print(f"Aider implementation failed with exit code {return_code}.", file=sys.stderr)
-        return return_code
-
-    if not working_diff(repo, args.base).strip():
-        cleanup_no_change_branch(repo, args.base, branch, reused)
-        print("NO_CHANGES_REQUIRED: Aider completed without repository changes.")
-        return 0
-
+    max_passes = max(1, args.review_passes)
+    pass_number = 1
+    current_task = _development_task(args.task, repo)
     review: dict[str, Any] | None = None
-    for review_pass in range(1, args.review_passes + 1):
-        print(f"[review {review_pass}/{args.review_passes}] asking {args.reviewer_model}...")
+
+    while pass_number <= max_passes:
+        return_code = run_aider(
+            repo,
+            task=current_task,
+            model=args.model,
+            ollama_url=args.ollama_url,
+            aider_command=args.aider_command,
+            test_command=test_command,
+            pass_number=pass_number,
+            pass_total=max_passes,
+        )
+        if return_code != 0:
+            print(f"Aider pass {pass_number} failed with exit code {return_code}.", file=sys.stderr)
+            return return_code
+
+        if not working_diff(repo, args.base).strip():
+            cleanup_no_change_branch(repo, args.base, branch, reused)
+            print("NO_CHANGES_REQUIRED: Aider completed without repository changes.")
+            return 0
+
+        validation = run_validation(repo, test_command, args.ollama_url)
+        if validation is not None and validation.returncode != 0:
+            if pass_number >= max_passes:
+                print("Independent validation did not pass after the final Aider pass.", file=sys.stderr)
+                return validation.returncode or 1
+            current_task = _revision_task(args.task, _validation_feedback(validation))
+            pass_number += 1
+            continue
+
+        print(f"[review {pass_number}/{max_passes}] asking {args.reviewer_model}...")
         review = run_reviewer(repo, args.task, args.base, args.ollama_url, args.reviewer_model)
         print(f"Reviewer summary: {review['summary']}")
         for issue in review.get("issues", []):
             print(f"Reviewer issue: {issue}")
+
         if review["approved"]:
             print("Review approved")
             break
 
-        if review_pass < args.review_passes:
-            feedback = "\n".join(f"- {issue}" for issue in review["issues"])
-            revision_task = (
-                f"Original task:\n{args.task}\n\n"
-                "The independent requirement-verification/quality gate found these blocking issues. "
-                "Fix the implementation so every original requirement is materially satisfied. "
-                "Maintain 100% unit-test coverage for Python production code and do not create or "
-                "modify component tests unless the original task explicitly requested them.\n"
-                f"{feedback}"
-            )
-            return_code = run_aider(
-                repo,
-                task=revision_task,
-                model=args.model,
-                ollama_url=args.ollama_url,
-                aider_command=args.aider_command,
-                test_command=test_command,
-                pass_number=review_pass + 1,
-                pass_total=args.review_passes,
-            )
-            if return_code != 0:
-                print(f"Aider revision failed with exit code {return_code}.", file=sys.stderr)
-                return return_code
+        if pass_number >= max_passes:
+            print("Reviewer did not approve the change.", file=sys.stderr)
+            return 2
+
+        feedback = "\n".join(f"- {issue}" for issue in review.get("issues", []))
+        current_task = _revision_task(args.task, feedback or review["summary"])
+        pass_number += 1
 
     if not review or not review["approved"]:
         print("Reviewer did not approve the change.", file=sys.stderr)
@@ -620,7 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Aider + Gemma against an InstaBounty repository.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    develop = subparsers.add_parser("develop", help="Implement, review and optionally commit a task.")
+    develop = subparsers.add_parser("develop", help="Implement, validate, review and optionally commit a task.")
     develop.add_argument("--repo", required=True)
     develop.add_argument("--task", required=True)
     develop.add_argument("--base", default="main")
