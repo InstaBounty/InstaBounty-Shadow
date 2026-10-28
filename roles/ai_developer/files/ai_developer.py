@@ -99,7 +99,7 @@ def create_work_branch(repo: Path, base: str, branch: str | None, task: str) -> 
     branch_name = branch or f"ai/{slugify(task)}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     if branch_name.lower() in PROTECTED_BRANCHES:
         raise AgentError(f"Refusing to use protected branch: {branch_name}")
-    if not (branch_name.startswith("ai/") or branch_name.startswith("feature/")):
+    if not branch_name.startswith(("ai/", "feature/")):
         raise AgentError("AI work branches must start with 'ai/' or 'feature/'.")
 
     exists = git(repo, "show-ref", "--verify", f"refs/heads/{branch_name}", check=False).returncode == 0
@@ -116,12 +116,10 @@ def create_work_branch(repo: Path, base: str, branch: str | None, task: str) -> 
 
 def working_diff(repo: Path, base: str) -> str:
     git(repo, "add", "-N", "--", ".", check=False)
+    committed = git(repo, "diff", f"{base}...HEAD", check=False).stdout
     staged = git(repo, "diff", "--cached", check=False).stdout
     unstaged = git(repo, "diff", check=False).stdout
-    diff = staged + unstaged
-    committed = git(repo, "diff", f"{base}...HEAD", check=False).stdout
-    if committed.strip():
-        diff = committed + diff
+    diff = committed + staged + unstaged
     if len(diff) > MAX_DIFF:
         return diff[:MAX_DIFF] + f"\n... diff truncated at {MAX_DIFF} characters ..."
     return diff
@@ -145,6 +143,41 @@ def repository_file_context(repo: Path, limit: int = 400) -> str:
     visible = files[:limit]
     suffix = "\n... repository file list truncated ..." if len(files) > limit else ""
     return "\n".join(visible) + suffix
+
+
+def canonical_requirements(task: str) -> list[dict[str, str]]:
+    """Extract stable R1..Rn requirements from numbered task items.
+
+    Continuation lines, including indented bullets, remain attached to the numbered
+    requirement that introduced them. If the task has no numbered requirements,
+    the complete task becomes R1 so the reviewer still has an immutable contract.
+    """
+    requirements: list[str] = []
+    current: list[str] = []
+
+    for raw_line in task.splitlines():
+        match = re.match(r"^\s*\d+[.)]\s+(\S.*)$", raw_line)
+        if match:
+            if current:
+                requirements.append("\n".join(current).strip())
+            current = [match.group(1).strip()]
+            continue
+        if current and raw_line.strip():
+            current.append(raw_line.strip())
+
+    if current:
+        requirements.append("\n".join(current).strip())
+
+    if not requirements:
+        text = task.strip()
+        if text:
+            requirements = [text]
+
+    return [{"id": f"R{index}", "text": text} for index, text in enumerate(requirements, start=1)]
+
+
+def requirement_checklist(task: str) -> str:
+    return "\n".join(f"{item['id']}: {item['text']}" for item in canonical_requirements(task))
 
 
 def housekeeping_only_issue(task: str, files: list[str]) -> str | None:
@@ -221,6 +254,15 @@ def explicit_unit_test_issue(task: str, files: list[str]) -> str | None:
     if any(_is_unit_test_file(path) for path in files):
         return None
     return "The task explicitly requires unit tests, but no unit-test file is present in the proposed changes."
+
+
+def explicit_openapi_issue(task: str, files: list[str]) -> str | None:
+    requirements = canonical_requirements(task)
+    if not any("openapi" in item["text"].lower() for item in requirements):
+        return None
+    if any("openapi" in path.lower() for path in files):
+        return None
+    return "The task explicitly requires OpenAPI changes, but no OpenAPI file is present in the proposed changes."
 
 
 def python_package_name(repo: Path) -> str | None:
@@ -307,6 +349,7 @@ def deterministic_quality_issues(
         housekeeping_only_issue(task, files),
         component_test_policy_issue(task, files),
         explicit_unit_test_issue(task, files),
+        explicit_openapi_issue(task, files),
     ]
     if require_coverage:
         issues.append(coverage_issue(repo, files))
@@ -463,48 +506,61 @@ def ollama_chat(url: str, model: str, messages: list[dict[str, str]], timeout: i
     return parsed
 
 
-def _explicit_requirement_count(task: str) -> int:
-    numbered = re.findall(r"(?m)^\s*\d+[.)]\s+\S", task)
-    if numbered:
-        return len(numbered)
-    bullets = re.findall(r"(?m)^\s*[-*]\s+\S", task)
-    return len(bullets)
-
-
 def _normalize_review_requirements(
-    review: dict[str, Any], task: str
+    review: dict[str, Any],
+    expected_requirements: list[dict[str, str]],
 ) -> tuple[list[dict[str, str | bool]], list[str]]:
     raw_requirements = review.get("requirements")
     if not isinstance(raw_requirements, list) or not raw_requirements:
         return [], ["Reviewer did not provide requirement-by-requirement verification."]
 
-    requirements: list[dict[str, str | bool]] = []
+    expected_by_id = {item["id"]: item["text"] for item in expected_requirements}
+    seen: set[str] = set()
+    normalized: list[dict[str, str | bool]] = []
     issues: list[str] = []
-    expected = _explicit_requirement_count(task)
-    if expected and len(raw_requirements) < expected:
-        issues.append(
-            f"Reviewer verified only {len(raw_requirements)} requirement(s), but the task contains "
-            f"at least {expected} explicit requirement(s)."
-        )
 
     for index, item in enumerate(raw_requirements, start=1):
         if not isinstance(item, dict):
             issues.append(f"Reviewer requirement {index} is malformed.")
             continue
-        requirement = str(item.get("requirement", "")).strip()
+
+        requirement_id = str(item.get("id", "")).strip().upper()
         evidence = str(item.get("evidence", "")).strip()
         satisfied = item.get("satisfied") is True
-        if not requirement:
-            issues.append(f"Reviewer requirement {index} has no requirement text.")
+
+        if not requirement_id:
+            issues.append(f"Reviewer requirement {index} has no requirement ID.")
+            continue
+        if requirement_id not in expected_by_id:
+            issues.append(f"Reviewer returned unknown requirement ID {requirement_id}.")
+            continue
+        if requirement_id in seen:
+            issues.append(f"Reviewer returned duplicate requirement ID {requirement_id}.")
+            continue
+
+        seen.add(requirement_id)
+        requirement_text = expected_by_id[requirement_id]
         if not evidence:
-            issues.append(f"Reviewer requirement {index} has no evidence.")
+            issues.append(f"Reviewer requirement {requirement_id} has no evidence.")
         if not satisfied:
             issues.append(
-                f"Requirement not satisfied: {requirement or f'requirement {index}'}. "
+                f"Requirement {requirement_id} not satisfied: {requirement_text}. "
                 f"{evidence or 'No supporting evidence was supplied.'}"
             )
-        requirements.append({"requirement": requirement, "satisfied": satisfied, "evidence": evidence})
-    return requirements, issues
+        normalized.append(
+            {
+                "id": requirement_id,
+                "requirement": requirement_text,
+                "satisfied": satisfied,
+                "evidence": evidence,
+            }
+        )
+
+    missing = [requirement_id for requirement_id in expected_by_id if requirement_id not in seen]
+    if missing:
+        issues.append(f"Reviewer omitted canonical requirement ID(s): {', '.join(missing)}.")
+
+    return normalized, issues
 
 
 def run_reviewer(
@@ -520,6 +576,7 @@ def run_reviewer(
     system_prompt = (install_dir / "reviewer_prompt.md").read_text(encoding="utf-8")
     diff = working_diff(repo, base)
     files = changed_files(repo, base)
+    requirements = canonical_requirements(task)
 
     deterministic_issues = deterministic_quality_issues(
         repo,
@@ -552,6 +609,7 @@ def run_reviewer(
                 "role": "user",
                 "content": (
                     f"Requested task:\n{task}\n\n"
+                    f"Canonical requirement checklist:\n{requirement_checklist(task)}\n\n"
                     f"Changed files:\n" + "\n".join(files) + "\n\n"
                     f"Coverage evidence:\n{coverage_evidence}\n\n"
                     f"Repository file context:\n{repository_file_context(repo)}\n\n"
@@ -566,7 +624,7 @@ def run_reviewer(
         raw_issues = [str(raw_issues)]
     normalized_issues = [str(issue).strip() for issue in raw_issues if str(issue).strip()]
 
-    requirements, requirement_issues = _normalize_review_requirements(review, task)
+    normalized_requirements, requirement_issues = _normalize_review_requirements(review, requirements)
     normalized_issues.extend(requirement_issues)
 
     approved = review.get("approved") is True and not normalized_issues
@@ -578,7 +636,7 @@ def run_reviewer(
     return {
         "approved": approved,
         "summary": summary,
-        "requirements": requirements,
+        "requirements": normalized_requirements,
         "issues": normalized_issues,
     }
 
@@ -605,18 +663,20 @@ def _development_task(task: str, repo: Path) -> str:
         "- Satisfy every explicit requirement in the original task exactly.",
         "- Production-code changes must be covered by unit tests.",
         "- Do not create or modify component tests unless the original task explicitly requests component tests.",
+        "- The reviewer will verify each numbered requirement using immutable R1..Rn IDs; do not omit or substitute requirements.",
     ]
     if python_package_name(repo) is not None:
         policy.append(
             "- 100% unit-test coverage is a mandatory final quality gate after the implementation "
             "has passed functional tests and requirement verification; focus first on correct behaviour and unit tests."
         )
-    return f"{task}\n\n" + "\n".join(policy)
+    return f"{task}\n\nCanonical requirement checklist:\n{requirement_checklist(task)}\n\n" + "\n".join(policy)
 
 
 def _revision_task(task: str, reason: str) -> str:
     return (
         f"Original task:\n{task}\n\n"
+        f"Canonical requirement checklist:\n{requirement_checklist(task)}\n\n"
         "The independent functional validation/requirement gate found blocking issues. Fix them while still "
         "satisfying every original requirement. Do not create or modify component tests unless the original "
         "task explicitly requested them.\n\n"
@@ -671,12 +731,7 @@ def command_develop(args: argparse.Namespace) -> int:
             print("NO_CHANGES_REQUIRED: Aider completed without repository changes.")
             return 0
 
-        functional = run_validation(
-            repo,
-            test_command,
-            args.ollama_url,
-            stage="Functional",
-        )
+        functional = run_validation(repo, test_command, args.ollama_url, stage="Functional")
         if functional is not None and functional.returncode != 0:
             if pass_number >= max_passes:
                 print("Functional validation did not pass after the final Aider pass.", file=sys.stderr)
@@ -709,12 +764,7 @@ def command_develop(args: argparse.Namespace) -> int:
 
         print("Review approved")
 
-        coverage = run_validation(
-            repo,
-            coverage_command,
-            args.ollama_url,
-            stage="Coverage",
-        )
+        coverage = run_validation(repo, coverage_command, args.ollama_url, stage="Coverage")
         if coverage is None or coverage.returncode == 0:
             coverage_passed = True
             break
