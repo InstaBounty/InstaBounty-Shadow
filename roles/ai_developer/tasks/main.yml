@@ -37,6 +37,22 @@
       The AI developer requires {{ ai_developer_model }} and
       {{ ai_reviewer_model }}. Run the llm_models role first.
 
+- name: Install or update Aider
+  ansible.windows.win_command:
+    cmd: >-
+      uv tool install --force --python 3.12 --with pip
+      "{{ ai_developer_aider_package }}"
+  register: ai_developer_aider_install
+  changed_when: >-
+    'Installed' in ai_developer_aider_install.stdout or
+    'Updated' in ai_developer_aider_install.stdout or
+    'Resolved' in ai_developer_aider_install.stdout
+
+- name: Verify Aider is available
+  ansible.windows.win_command:
+    cmd: "{{ ai_developer_aider_command }} --version"
+  changed_when: false
+
 - name: Create AI developer install directory
   ansible.windows.win_file:
     path: "{{ ai_developer_install_dir }}"
@@ -47,15 +63,10 @@
     path: "{{ ai_developer_bin_dir }}"
     state: directory
 
-- name: Install AI developer runner
+- name: Install Aider-backed AI developer runner
   ansible.windows.win_copy:
     src: ai_developer.py
     dest: "{{ ai_developer_install_dir }}\\ai_developer.py"
-
-- name: Install AI developer system prompt
-  ansible.windows.win_copy:
-    src: developer_prompt.md
-    dest: "{{ ai_developer_install_dir }}\\developer_prompt.md"
 
 - name: Install AI reviewer system prompt
   ansible.windows.win_copy:
@@ -89,6 +100,6 @@
 - name: Display AI developer installation
   ansible.builtin.debug:
     msg:
-      - "AI developer model: {{ ai_developer_model }}"
+      - "Implementation agent: Aider + ollama_chat/{{ ai_developer_model }}"
       - "AI reviewer model: {{ ai_reviewer_model }}"
       - "Run ai-dev --help from a new terminal after provisioning."
