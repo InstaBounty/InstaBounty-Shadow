@@ -1,14 +1,14 @@
 # InstaBounty Local AI Developer
 
-Shadow includes a local development agent backed by the Ollama models already provisioned on the workstation.
+Shadow uses an Aider-backed local development workflow with Ollama models.
 
 The default roles are:
 
-- `qwen2.5-coder:7b` — implementation agent
-- `gemma3:4b` — code reviewer
+- `qwen2.5-coder:7b` — implementation model used by Aider
+- `gemma3:4b` — independent diff reviewer
 - `mxbai-embed-large` — retained for later repository/architecture retrieval work
 
-## Install or update the runner
+## Install or update
 
 From the Ansible controller:
 
@@ -18,131 +18,110 @@ ansible-playbook -i inventory.yml playbook.yml \
   -e perform_final_reboot=false
 ```
 
-The role validates that Ollama is reachable and that the developer/reviewer models are installed before installing the runner.
-
-Open a new terminal after provisioning so the updated machine `PATH` is available.
+The role verifies Ollama and the required models, installs `aider-chat` with `uv tool install`, and installs the `ai-dev` / `ai-review` wrappers under `C:\Program Files\InstaBounty\bin`.
 
 ## Run a development task
-
-Use `ai-dev` and provide a repository root and a concrete development task:
 
 ```powershell
 ai-dev `
   --repo C:\Users\Shadow\instabounty\gateway `
-  --task "Add unit tests for the uncovered error path in signer.py"
+  --task "Add a GET /ping endpoint"
 ```
 
 The runner will:
 
 1. require a clean Git working tree;
-2. switch to the configured base branch (`main` by default);
-3. create an `ai/...` feature branch;
-4. ask the coding model to inspect and modify the repository;
-5. allow the model to run repository validation through a constrained command list;
-6. ask the reviewer model to review the resulting diff;
-7. feed blocking review issues back to the coding model for another pass;
-8. create a local commit only after reviewer approval.
+2. switch to `main` (or the configured base branch);
+3. create an `ai/...` or `feature/...` work branch;
+4. run Aider non-interactively with `ollama_chat/qwen2.5-coder:7b`;
+5. auto-detect a conservative repository validation command when possible (`uv run pytest`, `pnpm test`, `npm test`, or `forge test`) and give it to Aider's auto-test loop;
+6. send the resulting diff to Gemma for independent review;
+7. if Gemma rejects the diff, run one Aider revision pass with the review feedback;
+8. create a local commit only after Gemma approves.
 
-The runner never pushes the branch and never creates or merges a pull request. GitHub remains the review/deployment boundary.
+Aider auto-commits and commit attribution are disabled. The wrapper owns the final commit. Nothing is pushed and no pull request is created by Shadow itself.
 
-## Choose the branch name
+## Custom validation
 
-The default branch name is generated from the task. To choose one explicitly:
+Override the detected validation command when a repository needs something more specific:
 
 ```powershell
 ai-dev `
   --repo C:\Users\Shadow\instabounty\gateway `
-  --branch feature/signer-coverage `
-  --task "Add unit tests for the uncovered error path in signer.py"
+  --task "Update request tracing" `
+  --test-cmd "uv run pytest tests/unit"
+```
+
+## Choose the branch name
+
+```powershell
+ai-dev `
+  --repo C:\Users\Shadow\instabounty\gateway `
+  --branch feature/ping-endpoint `
+  --task "Add a GET /ping endpoint"
 ```
 
 AI work branches must start with `ai/` or `feature/`. `main` and `master` cannot be used as work branches.
 
-## Leave the changes uncommitted
-
-For early testing of the agent, use `--no-commit`:
+## Leave changes uncommitted
 
 ```powershell
 ai-dev `
   --repo C:\Users\Shadow\instabounty\gateway `
-  --task "Add unit tests for the uncovered error path in signer.py" `
+  --task "Add a GET /ping endpoint" `
   --no-commit
 ```
 
-The reviewer must still approve the change, but the working tree is left uncommitted for manual inspection.
+Gemma must still approve the diff, but the changes remain uncommitted for inspection.
 
 ## Review an existing diff
-
-The reviewer can be run independently:
 
 ```powershell
 ai-review `
   --repo C:\Users\Shadow\instabounty\gateway `
-  --task "Review the signer unit-test changes"
+  --task "Review the current Gateway changes"
 ```
-
-It returns a JSON review containing `approved`, `summary`, and `issues`.
 
 ## Safety boundaries
 
-The runner is intentionally more restrictive than a general shell agent.
+- Aider runs with the selected repository as its working directory.
+- The wrapper requires a clean repository before starting.
+- Branch creation is performed by the wrapper, not by the model.
+- Aider auto-commits are disabled.
+- Gemma reviews the actual Git diff before the wrapper commits.
+- The runner does not push, create pull requests, or merge.
+- Gina strips Slack/GitHub credentials before launching `ai-dev`.
+- Gina owns push/PR handoff and failed `ai/...` branch cleanup.
+- Aider analytics/update checks are disabled for automated runs.
+- Project test commands are run with offline package-manager environment settings where applicable.
 
-- File operations are confined to the selected repository.
-- `.git` contents cannot be read or modified by the model.
-- The model cannot change branches, push, merge, rebase, reset, or tag.
-- Git mutation is performed by the runner itself.
-- The model receives only an allow-listed set of development commands.
-- Dependency-install/update subcommands are not exposed to the model.
-- `uv`, npm and pnpm are executed with offline environment settings.
-- Shell metacharacter expansion is avoided by executing commands as argument arrays rather than through `cmd.exe` or PowerShell.
-- The runner does not read credentials or inject secrets into model prompts.
-- A dirty working tree is rejected at startup to avoid overwriting manual work.
+Aider replaces the previous hand-written JSON action loop. It provides repository mapping, edit application, context management, and test-repair behaviour without requiring the local model to manually orchestrate `read_file`, `search_text`, `write_file`, and `run_command` actions.
 
-The command allow-list is a guardrail rather than an operating-system sandbox. Repository scripts invoked through trusted development tools can themselves execute code, so the agent should still be used only against trusted InstaBounty repositories.
-
-## Current command families
-
-The implementation agent may invoke:
-
-- `uv run ...`
-- `pytest ...`
-- `ruff ...`
-- `mypy ...`
-- `coverage ...`
-- `pnpm test`, `pnpm run`, `pnpm exec`, and `pnpm lint`
-- `npm test` and `npm run`
-- `forge test`, `forge build`, and `forge fmt`
-- `solc ...`
-- read-only Git commands such as `status`, `diff`, `log`, `show`, `grep`, `ls-files`, and `rev-parse`
-
-Additional command families should be added deliberately when a repository actually needs them.
-
-## Typical workflow
+## Workflow
 
 ```text
-You + ChatGPT
-    |
-    | define a small, testable task
-    v
+Slack
+  |
+  v
+Gina
+  |
+  v
 ai-dev on Shadow
-    |
-    +-- Qwen inspects/implements/tests
-    |
-    +-- Gemma reviews
-    |      |
-    |      +-- issues -> Qwen revision
-    |
-    v
-local feature-branch commit
-    |
-    v
-push + GitHub pull request
-    |
-    v
-ChatGPT/manual review + CI
-    |
-    v
-merge
+  |
+  +-- Aider + Qwen implements/tests
+  |
+  +-- Gemma reviews diff
+  |      |
+  |      +-- issues -> Aider revision pass
+  |
+  v
+reviewed local commit
+  |
+  v
+Gina pushes + creates GitHub PR
+  |
+  v
+human review / CI / merge
 ```
 
-The next evolution of the runner can add repository embeddings and cross-repository architecture context using `mxbai-embed-large`, but the first version intentionally keeps the execution path simple and inspectable.
+For the first Aider integration we intentionally keep `qwen2.5-coder:7b` so we can measure the effect of replacing the agent framework separately from upgrading the coding model. A stronger local model can be evaluated afterwards without changing the Gina orchestration.
