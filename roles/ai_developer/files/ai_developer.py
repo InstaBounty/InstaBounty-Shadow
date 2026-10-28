@@ -21,6 +21,7 @@ DEFAULT_REVIEWER_MODEL = "gemma3:4b"
 MAX_FILE_BYTES = 1_000_000
 MAX_TOOL_OUTPUT = 30_000
 CONSOLE_TOOL_OUTPUT = 4_000
+MAX_INVALID_ACTIONS = 3
 SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", ".next", ".pytest_cache"}
 DIRECT_COMMANDS = {"pytest", "ruff", "mypy", "coverage", "solc"}
 COMMAND_SUBCOMMANDS = {
@@ -31,6 +32,16 @@ COMMAND_SUBCOMMANDS = {
 }
 READ_ONLY_GIT_COMMANDS = {"status", "diff", "log", "show", "grep", "ls-files", "rev-parse"}
 PROTECTED_BRANCHES = {"main", "master"}
+MODEL_ACTIONS = {
+    "list_files",
+    "read_file",
+    "search_text",
+    "write_file",
+    "delete_file",
+    "run_command",
+    "done",
+    "blocked",
+}
 
 
 class AgentError(RuntimeError):
@@ -332,6 +343,7 @@ def run_developer(
         messages.append({"role": "user", "content": f"Code review feedback to resolve:\n{item}"})
 
     mutation_seen = False
+    invalid_actions = 0
     for step in range(1, max_steps + 1):
         print(f"[developer {step}/{max_steps}] asking {model}...")
         action = ollama_chat(ollama_url, model, messages)
@@ -339,9 +351,39 @@ def run_developer(
         if action.get("action") == "execute_command":
             action = {**action, "action": "run_command"}
 
+        action_name = action.get("action")
+        if not isinstance(action_name, str) or action_name not in MODEL_ACTIONS:
+            invalid_actions += 1
+            print("  action: <invalid>")
+            print(
+                "  protocol_error: model response must contain one supported action: "
+                + ", ".join(sorted(MODEL_ACTIONS))
+            )
+            messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Protocol error: your previous JSON response did not contain a supported "
+                        "`action`. Return exactly one JSON object using one of these action names: "
+                        + ", ".join(sorted(MODEL_ACTIONS))
+                        + ". Do not add prose outside the JSON object."
+                    ),
+                }
+            )
+            if invalid_actions >= MAX_INVALID_ACTIONS:
+                return {
+                    "status": "blocked",
+                    "summary": (
+                        "Model returned an invalid action response "
+                        f"{invalid_actions} consecutive times."
+                    ),
+                }
+            continue
+
+        invalid_actions = 0
         messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
-        action_name = str(action.get("action", ""))
-        print(f"  action: {action_name or '<missing>'}")
+        print(f"  action: {action_name}")
         try:
             status, result = dispatch_action(repo, action)
         except (AgentError, OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -353,12 +395,9 @@ def run_developer(
         if action_name in {"write_file", "delete_file"} and "error" not in result:
             mutation_seen = True
 
-        if (
-            action_name == "run_command"
-            and mutation_seen
-            and result.get("returncode") == 0
-        ):
+        if action_name == "run_command" and mutation_seen and result.get("returncode") == 0:
             command = " ".join(str(value) for value in result.get("args", []))
+            print("Validation passed; handing changes to reviewer.")
             return {
                 "status": "done",
                 "summary": f"Repository changes made and validation passed: {command}",
@@ -370,7 +409,6 @@ def run_developer(
 
 
 def working_diff(repo: Path, base: str) -> str:
-    # Intent-to-add makes newly created files visible in `git diff` without staging content.
     git(repo, "add", "-N", "--", ".", check=False)
     staged = git(repo, "diff", "--cached", check=False).stdout
     unstaged = git(repo, "diff", check=False).stdout
@@ -428,7 +466,11 @@ def command_develop(args: argparse.Namespace) -> int:
     developer_result = run_developer(repo, args.task, args.ollama_url, args.model, args.max_steps)
     print(f"Developer summary: {developer_result['summary']}")
     if developer_result["status"] == "blocked":
-        print("Developer reported the task as blocked. No review was requested; branch and working tree were left intact for inspection.", file=sys.stderr)
+        print(
+            "Developer reported the task as blocked. No review was requested; "
+            "branch and working tree were left intact for inspection.",
+            file=sys.stderr,
+        )
         return 2
 
     if not working_diff(repo, args.base).strip():
@@ -453,11 +495,18 @@ def command_develop(args: argparse.Namespace) -> int:
             )
             print(f"Developer revision summary: {developer_result['summary']}")
             if developer_result["status"] == "blocked":
-                print("Developer revision reported the task as blocked. Branch and working tree were left intact for inspection.", file=sys.stderr)
+                print(
+                    "Developer revision reported the task as blocked. "
+                    "Branch and working tree were left intact for inspection.",
+                    file=sys.stderr,
+                )
                 return 2
 
     if not review or not review["approved"]:
-        print("Reviewer did not approve the change. The branch and working tree were left intact for inspection.", file=sys.stderr)
+        print(
+            "Reviewer did not approve the change. The branch and working tree were left intact for inspection.",
+            file=sys.stderr,
+        )
         return 2
 
     if args.no_commit:
