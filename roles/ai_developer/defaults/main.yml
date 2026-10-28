@@ -4,6 +4,6 @@ ai_reviewer_model: gemma3:4b
 ai_developer_ollama_url: http://127.0.0.1:11434
 ai_developer_install_dir: 'C:\Program Files\InstaBounty\AI Developer'
 ai_developer_bin_dir: 'C:\Program Files\InstaBounty\bin'
-ai_developer_aider_command: aider
+ai_developer_aider_command: 'C:\Program Files\InstaBounty\bin\aider.exe'
 ai_developer_aider_package: aider-chat@latest
 ai_developer_review_passes: 2
