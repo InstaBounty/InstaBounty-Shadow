@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Constrained local development agent for the InstaBounty Shadow workstation."""
+"""Aider-backed local development runner for the InstaBounty Shadow workstation."""
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
-import fnmatch
 import json
 import os
 from pathlib import Path
@@ -18,41 +17,23 @@ from urllib import error, request
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_DEVELOPER_MODEL = "qwen2.5-coder:7b"
 DEFAULT_REVIEWER_MODEL = "gemma3:4b"
-MAX_FILE_BYTES = 1_000_000
-MAX_TOOL_OUTPUT = 30_000
-CONSOLE_TOOL_OUTPUT = 4_000
-MAX_INVALID_ACTIONS = 3
-SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", ".next", ".pytest_cache"}
-DIRECT_COMMANDS = {"pytest", "ruff", "mypy", "coverage", "solc"}
-COMMAND_SUBCOMMANDS = {
-    "uv": {"run"},
-    "pnpm": {"test", "run", "exec", "lint"},
-    "npm": {"test", "run"},
-    "forge": {"test", "build", "fmt"},
-}
-READ_ONLY_GIT_COMMANDS = {"status", "diff", "log", "show", "grep", "ls-files", "rev-parse"}
+DEFAULT_AIDER_COMMAND = "aider"
 PROTECTED_BRANCHES = {"main", "master"}
-MODEL_ACTIONS = {
-    "list_files",
-    "read_file",
-    "search_text",
-    "write_file",
-    "delete_file",
-    "run_command",
-    "done",
-    "blocked",
-}
+MAX_DIFF = 120_000
 
 
 class AgentError(RuntimeError):
     pass
 
 
-def run_process(args: list[str], cwd: Path, timeout: int = 300, check: bool = False) -> subprocess.CompletedProcess[str]:
-    environment = os.environ.copy()
-    environment["UV_OFFLINE"] = "1"
-    environment["NPM_CONFIG_OFFLINE"] = "true"
-    environment["PNPM_CONFIG_OFFLINE"] = "true"
+def run_process(
+    args: list[str],
+    cwd: Path,
+    *,
+    timeout: int = 600,
+    check: bool = False,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         args,
         cwd=str(cwd),
@@ -60,7 +41,7 @@ def run_process(args: list[str], cwd: Path, timeout: int = 300, check: bool = Fa
         capture_output=True,
         timeout=timeout,
         shell=False,
-        env=environment,
+        env=env,
     )
     if check and result.returncode != 0:
         raise AgentError(
@@ -98,7 +79,7 @@ def ensure_clean(repo: Path) -> None:
 
 def slugify(value: str, limit: int = 36) -> str:
     value = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
-    return (value[:limit].rstrip("-") or "change")
+    return value[:limit].rstrip("-") or "change"
 
 
 def create_work_branch(repo: Path, base: str, branch: str | None, task: str) -> str:
@@ -112,154 +93,101 @@ def create_work_branch(repo: Path, base: str, branch: str | None, task: str) -> 
         raise AgentError(f"Refusing to use protected branch: {branch_name}")
     if not (branch_name.startswith("ai/") or branch_name.startswith("feature/")):
         raise AgentError("AI work branches must start with 'ai/' or 'feature/'.")
-
-    exists = git(repo, "show-ref", "--verify", f"refs/heads/{branch_name}", check=False)
-    if exists.returncode == 0:
+    if git(repo, "show-ref", "--verify", f"refs/heads/{branch_name}", check=False).returncode == 0:
         raise AgentError(f"Branch already exists: {branch_name}")
+
     git(repo, "switch", "-c", branch_name)
     return branch_name
 
 
-def confined_path(repo: Path, relative: str) -> Path:
-    if not relative or relative == ".":
-        return repo
-    candidate = (repo / relative).resolve()
-    try:
-        candidate.relative_to(repo)
-    except ValueError as exc:
-        raise AgentError(f"Path escapes repository: {relative}") from exc
-    if ".git" in candidate.relative_to(repo).parts:
-        raise AgentError("Access to .git is not allowed.")
-    return candidate
+def working_diff(repo: Path, base: str) -> str:
+    git(repo, "add", "-N", "--", ".", check=False)
+    diff = git(repo, "diff", check=False).stdout
+    if not diff.strip():
+        diff = git(repo, "diff", f"{base}...HEAD", check=False).stdout
+    if len(diff) > MAX_DIFF:
+        return diff[:MAX_DIFF] + f"\n... diff truncated at {MAX_DIFF} characters ..."
+    return diff
 
 
-def truncate(text: str, limit: int = MAX_TOOL_OUTPUT) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n... output truncated at {limit} characters ..."
+def detected_test_command(repo: Path) -> str | None:
+    if (repo / "pyproject.toml").is_file():
+        return "uv run pytest"
+    if (repo / "pnpm-lock.yaml").is_file():
+        return "pnpm test"
+    if (repo / "package.json").is_file():
+        return "npm test"
+    if (repo / "foundry.toml").is_file():
+        return "forge test"
+    return None
 
 
-def list_files(repo: Path, relative: str, pattern: str) -> dict[str, Any]:
-    root = confined_path(repo, relative)
-    if not root.exists() or not root.is_dir():
-        raise AgentError(f"Directory does not exist: {relative}")
-    results: list[str] = []
-    for current_root, dirs, files in os.walk(root):
-        dirs[:] = [name for name in dirs if name not in SKIP_DIRS]
-        current = Path(current_root)
-        for name in files:
-            path = current / name
-            rel = path.relative_to(repo).as_posix()
-            if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(rel, pattern):
-                results.append(rel)
-                if len(results) >= 500:
-                    return {"files": results, "truncated": True}
-    return {"files": results, "truncated": False}
+def aider_environment(ollama_url: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["OLLAMA_API_BASE"] = ollama_url
+    env["AIDER_ANALYTICS"] = "false"
+    env["AIDER_CHECK_UPDATE"] = "false"
+    env["AIDER_SHOW_RELEASE_NOTES"] = "false"
+    env["UV_OFFLINE"] = "1"
+    env["NPM_CONFIG_OFFLINE"] = "true"
+    env["PNPM_CONFIG_OFFLINE"] = "true"
+    return env
 
 
-def read_file(repo: Path, relative: str, start_line: int, end_line: int) -> dict[str, Any]:
-    path = confined_path(repo, relative)
-    if not path.is_file():
-        raise AgentError(f"File does not exist: {relative}")
-    if path.stat().st_size > MAX_FILE_BYTES:
-        raise AgentError(f"File is too large to read: {relative}")
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    start = max(1, start_line)
-    end = min(len(lines), max(start, end_line))
-    numbered = "\n".join(f"{index}: {lines[index - 1]}" for index in range(start, end + 1))
-    return {"path": relative, "start_line": start, "end_line": end, "content": truncate(numbered)}
+def run_aider(
+    repo: Path,
+    *,
+    task: str,
+    model: str,
+    ollama_url: str,
+    aider_command: str,
+    test_command: str | None,
+    pass_number: int,
+    pass_total: int,
+) -> int:
+    print(f"[aider {pass_number}/{pass_total}] implementing with {model}...")
+    command = [
+        aider_command,
+        "--model",
+        f"ollama_chat/{model}",
+        "--message",
+        task,
+        "--yes",
+        "--no-auto-commits",
+        "--no-dirty-commits",
+        "--no-attribute-author",
+        "--no-attribute-committer",
+        "--no-attribute-co-authored-by",
+        "--no-auto-lint",
+        "--no-pretty",
+        "--no-stream",
+        "--no-check-update",
+        "--no-show-release-notes",
+        "--analytics-disable",
+    ]
+    if test_command:
+        print(f"Aider validation command: {test_command}")
+        command.extend(["--test-cmd", test_command, "--auto-test"])
 
-
-def search_text(repo: Path, query: str, relative: str) -> dict[str, Any]:
-    if not query:
-        raise AgentError("search_text requires a non-empty query.")
-    root = confined_path(repo, relative)
-    matches: list[dict[str, Any]] = []
-    paths = [root] if root.is_file() else [Path(p) for p in list_files(repo, relative, "*")["files"]]
-    for entry in paths:
-        path = entry if entry.is_absolute() else repo / entry
-        if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
-            continue
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError:
-            continue
-        for index, line in enumerate(lines, 1):
-            if query.lower() in line.lower():
-                matches.append({"path": path.relative_to(repo).as_posix(), "line": index, "text": line[:500]})
-                if len(matches) >= 200:
-                    return {"matches": matches, "truncated": True}
-    return {"matches": matches, "truncated": False}
-
-
-def write_file(repo: Path, relative: str, content: str) -> dict[str, Any]:
-    path = confined_path(repo, relative)
-    if path == repo:
-        raise AgentError("Cannot write to the repository root as a file.")
-    encoded = content.encode("utf-8")
-    if len(encoded) > MAX_FILE_BYTES:
-        raise AgentError(f"Refusing to write file larger than {MAX_FILE_BYTES} bytes: {relative}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="")
-    return {"path": relative, "bytes": len(encoded)}
-
-
-def delete_file(repo: Path, relative: str) -> dict[str, Any]:
-    path = confined_path(repo, relative)
-    if not path.is_file():
-        raise AgentError(f"File does not exist: {relative}")
-    path.unlink()
-    return {"path": relative, "deleted": True}
-
-
-def validate_command(args: list[Any]) -> list[str]:
-    if not args or not all(isinstance(value, str) and value for value in args):
-        raise AgentError("run_command requires a non-empty string array in args.")
-    if any("\x00" in value or "\n" in value or "\r" in value for value in args):
-        raise AgentError("Command arguments may not contain control characters.")
-
-    command = Path(args[0]).name.lower()
-    if command in {"git", "git.exe"}:
-        if len(args) < 2 or args[1].lower() not in READ_ONLY_GIT_COMMANDS:
-            raise AgentError("Only read-only Git commands are available to the model.")
-    elif command in COMMAND_SUBCOMMANDS:
-        if len(args) < 2 or args[1].lower() not in COMMAND_SUBCOMMANDS[command]:
-            allowed = ", ".join(sorted(COMMAND_SUBCOMMANDS[command]))
-            raise AgentError(f"Allowed {command} subcommands: {allowed}")
-    elif command not in DIRECT_COMMANDS:
-        raise AgentError(f"Command is not allow-listed: {args[0]}")
-    return [str(value) for value in args]
-
-
-def execute_command(repo: Path, args: list[Any]) -> dict[str, Any]:
-    command = validate_command(args)
-    result = run_process(command, repo, timeout=300, check=False)
-    return {
-        "args": command,
-        "returncode": result.returncode,
-        "stdout": truncate(result.stdout),
-        "stderr": truncate(result.stderr),
-    }
-
-
-def print_tool_result(action: dict[str, Any], result: dict[str, Any]) -> None:
-    if action.get("action") != "run_command":
-        return
-    args = result.get("args", action.get("args", []))
-    print(f"  command: {' '.join(str(value) for value in args)}")
-    if "returncode" in result:
-        print(f"  exit: {result['returncode']}")
-    stdout = str(result.get("stdout", "")).strip()
-    stderr = str(result.get("stderr", "")).strip()
-    if stdout:
-        print("  stdout:")
-        print(truncate(stdout, CONSOLE_TOOL_OUTPUT))
-    if stderr:
-        print("  stderr:")
-        print(truncate(stderr, CONSOLE_TOOL_OUTPUT))
-    if result.get("error"):
-        print(f"  error: {result['error']}")
+    process = subprocess.Popen(
+        command,
+        cwd=str(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=aider_environment(ollama_url),
+        shell=False,
+    )
+    assert process.stdout is not None
+    for raw_line in process.stdout:
+        line = raw_line.rstrip()
+        if line:
+            print(f"AIDER: {line}")
+    return_code = process.wait()
+    print(f"Aider pass {pass_number} finished with exit code {return_code}.")
+    return return_code
 
 
 def ollama_chat(url: str, model: str, messages: list[dict[str, str]], timeout: int = 600) -> dict[str, Any]:
@@ -282,140 +210,10 @@ def ollama_chat(url: str, model: str, messages: list[dict[str, str]], timeout: i
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise AgentError(f"Model returned invalid JSON: {truncate(content, 2000)}") from exc
+        raise AgentError(f"Reviewer returned invalid JSON: {content[:2000]}") from exc
     if not isinstance(parsed, dict):
-        raise AgentError("Model response must be a JSON object.")
+        raise AgentError("Reviewer response must be a JSON object.")
     return parsed
-
-
-def repository_context(repo: Path) -> str:
-    files = git(repo, "ls-files").stdout.splitlines()
-    status = git(repo, "status", "--short", "--branch").stdout.strip()
-    visible_files = files[:400]
-    suffix = "\n... file list truncated ..." if len(files) > len(visible_files) else ""
-    return f"Git status:\n{status}\n\nTracked files:\n" + "\n".join(visible_files) + suffix
-
-
-def dispatch_action(repo: Path, action: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    name = action.get("action")
-    if name == "list_files":
-        return "continue", list_files(repo, str(action.get("path", ".")), str(action.get("pattern", "*")))
-    if name == "read_file":
-        return "continue", read_file(
-            repo,
-            str(action.get("path", "")),
-            int(action.get("start_line", 1)),
-            int(action.get("end_line", 250)),
-        )
-    if name == "search_text":
-        return "continue", search_text(repo, str(action.get("query", "")), str(action.get("path", ".")))
-    if name == "write_file":
-        return "continue", write_file(repo, str(action.get("path", "")), str(action.get("content", "")))
-    if name == "delete_file":
-        return "continue", delete_file(repo, str(action.get("path", "")))
-    if name == "run_command":
-        return "continue", execute_command(repo, action.get("args", []))
-    if name == "done":
-        return "done", {"summary": str(action.get("summary", "Development task complete."))}
-    if name == "blocked":
-        return "blocked", {"summary": str(action.get("summary", "Development task is blocked."))}
-    raise AgentError(f"Unknown model action: {name!r}")
-
-
-def run_developer(
-    repo: Path,
-    task: str,
-    ollama_url: str,
-    model: str,
-    max_steps: int,
-    feedback: list[str] | None = None,
-) -> dict[str, str]:
-    install_dir = Path(__file__).resolve().parent
-    system_prompt = (install_dir / "developer_prompt.md").read_text(encoding="utf-8")
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": f"Task:\n{task}\n\nRepository context:\n{repository_context(repo)}",
-        },
-    ]
-    for item in feedback or []:
-        messages.append({"role": "user", "content": f"Code review feedback to resolve:\n{item}"})
-
-    mutation_seen = False
-    invalid_actions = 0
-    for step in range(1, max_steps + 1):
-        print(f"[developer {step}/{max_steps}] asking {model}...")
-        action = ollama_chat(ollama_url, model, messages)
-
-        if action.get("action") == "execute_command":
-            action = {**action, "action": "run_command"}
-
-        action_name = action.get("action")
-        if not isinstance(action_name, str) or action_name not in MODEL_ACTIONS:
-            invalid_actions += 1
-            print("  action: <invalid>")
-            print(
-                "  protocol_error: model response must contain one supported action: "
-                + ", ".join(sorted(MODEL_ACTIONS))
-            )
-            messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Protocol error: your previous JSON response did not contain a supported "
-                        "`action`. Return exactly one JSON object using one of these action names: "
-                        + ", ".join(sorted(MODEL_ACTIONS))
-                        + ". Do not add prose outside the JSON object."
-                    ),
-                }
-            )
-            if invalid_actions >= MAX_INVALID_ACTIONS:
-                return {
-                    "status": "blocked",
-                    "summary": (
-                        "Model returned an invalid action response "
-                        f"{invalid_actions} consecutive times."
-                    ),
-                }
-            continue
-
-        invalid_actions = 0
-        messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
-        print(f"  action: {action_name}")
-        try:
-            status, result = dispatch_action(repo, action)
-        except (AgentError, OSError, ValueError, subprocess.SubprocessError) as exc:
-            result = {"error": str(exc)}
-            status = "continue"
-        print_tool_result(action, result)
-        messages.append({"role": "user", "content": "Tool result:\n" + json.dumps(result, ensure_ascii=False)})
-
-        if action_name in {"write_file", "delete_file"} and "error" not in result:
-            mutation_seen = True
-
-        if action_name == "run_command" and mutation_seen and result.get("returncode") == 0:
-            command = " ".join(str(value) for value in result.get("args", []))
-            print("Validation passed; handing changes to reviewer.")
-            return {
-                "status": "done",
-                "summary": f"Repository changes made and validation passed: {command}",
-            }
-
-        if status in {"done", "blocked"}:
-            return {"status": status, "summary": str(result["summary"])}
-    raise AgentError(f"Developer exceeded the maximum of {max_steps} steps.")
-
-
-def working_diff(repo: Path, base: str) -> str:
-    git(repo, "add", "-N", "--", ".", check=False)
-    staged = git(repo, "diff", "--cached", check=False).stdout
-    unstaged = git(repo, "diff", check=False).stdout
-    diff = staged + unstaged
-    if not diff.strip():
-        diff = git(repo, "diff", f"{base}...HEAD", check=False).stdout
-    return truncate(diff, 120_000)
 
 
 def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) -> dict[str, Any]:
@@ -423,29 +221,31 @@ def run_reviewer(repo: Path, task: str, base: str, ollama_url: str, model: str) 
     system_prompt = (install_dir / "reviewer_prompt.md").read_text(encoding="utf-8")
     diff = working_diff(repo, base)
     if not diff.strip():
-        return {"approved": False, "summary": "No changes were found to review.", "issues": ["No repository diff exists."]}
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Requested task:\n{task}\n\nProposed diff:\n{diff}"},
-    ]
-    review = ollama_chat(ollama_url, model, messages)
-    approved = review.get("approved") is True
+        return {
+            "approved": False,
+            "summary": "No changes were found to review.",
+            "issues": ["No repository diff exists."],
+        }
+
+    review = ollama_chat(
+        ollama_url,
+        model,
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Requested task:\n{task}\n\nProposed diff:\n{diff}"},
+        ],
+    )
     issues = review.get("issues", [])
     if not isinstance(issues, list):
         issues = [str(issues)]
-    normalized_issues = [str(issue).strip() for issue in issues if str(issue).strip()]
-    summary = str(review.get("summary", "")).strip()
-    if not approved and not normalized_issues:
-        normalized_issues = [
-            "Reviewer rejected the change without an actionable issue. Re-inspect the requested task and proposed diff, then correct any mismatch before requesting review again."
-        ]
-    if not summary:
-        summary = "Approved." if approved else "Reviewer found a blocking issue."
-    return {
-        "approved": approved,
-        "summary": summary,
-        "issues": normalized_issues,
-    }
+    normalized = [str(issue).strip() for issue in issues if str(issue).strip()]
+    approved = review.get("approved") is True
+    summary = str(review.get("summary", "")).strip() or (
+        "Approved." if approved else "Reviewer found a blocking issue."
+    )
+    if not approved and not normalized:
+        normalized = ["Reviewer rejected the change without an actionable issue."]
+    return {"approved": approved, "summary": summary, "issues": normalized}
 
 
 def default_commit_message(task: str) -> str:
@@ -457,56 +257,69 @@ def default_commit_message(task: str) -> str:
     return f"feat: {summary[0].lower() + summary[1:]}"
 
 
+def cleanup_no_change_branch(repo: Path, base: str, branch: str) -> None:
+    git(repo, "switch", base)
+    git(repo, "branch", "-D", branch)
+
+
 def command_develop(args: argparse.Namespace) -> int:
     repo = ensure_git_repo(Path(args.repo))
     ensure_clean(repo)
     branch = create_work_branch(repo, args.base, args.branch, args.task)
     print(f"Working branch: {branch}")
 
-    developer_result = run_developer(repo, args.task, args.ollama_url, args.model, args.max_steps)
-    print(f"Developer summary: {developer_result['summary']}")
-    if developer_result["status"] == "blocked":
-        print(
-            "Developer reported the task as blocked. No review was requested; "
-            "branch and working tree were left intact for inspection.",
-            file=sys.stderr,
-        )
-        return 2
+    test_command = args.test_cmd or detected_test_command(repo)
+    return_code = run_aider(
+        repo,
+        task=args.task,
+        model=args.model,
+        ollama_url=args.ollama_url,
+        aider_command=args.aider_command,
+        test_command=test_command,
+        pass_number=1,
+        pass_total=args.review_passes,
+    )
+    if return_code != 0:
+        print(f"Aider implementation failed with exit code {return_code}.", file=sys.stderr)
+        return return_code
 
     if not working_diff(repo, args.base).strip():
-        raise AgentError("Developer reported completion but made no repository changes.")
+        cleanup_no_change_branch(repo, args.base, branch)
+        print("NO_CHANGES_REQUIRED: Aider completed without repository changes.")
+        return 0
 
     review: dict[str, Any] | None = None
     for review_pass in range(1, args.review_passes + 1):
         print(f"[review {review_pass}/{args.review_passes}] asking {args.reviewer_model}...")
         review = run_reviewer(repo, args.task, args.base, args.ollama_url, args.reviewer_model)
-        print(json.dumps(review, indent=2, ensure_ascii=False))
+        print(f"Reviewer summary: {review['summary']}")
         if review["approved"]:
+            print("Review approved")
             break
-        feedback = "\n".join(f"- {issue}" for issue in review["issues"])
+
         if review_pass < args.review_passes:
-            developer_result = run_developer(
-                repo,
-                args.task,
-                args.ollama_url,
-                args.model,
-                args.max_steps,
-                feedback=[feedback],
+            feedback = "\n".join(f"- {issue}" for issue in review["issues"])
+            revision_task = (
+                f"Original task:\n{args.task}\n\n"
+                "An independent reviewer found these blocking issues. Fix only these issues, "
+                f"then run the relevant validation:\n{feedback}"
             )
-            print(f"Developer revision summary: {developer_result['summary']}")
-            if developer_result["status"] == "blocked":
-                print(
-                    "Developer revision reported the task as blocked. "
-                    "Branch and working tree were left intact for inspection.",
-                    file=sys.stderr,
-                )
-                return 2
+            return_code = run_aider(
+                repo,
+                task=revision_task,
+                model=args.model,
+                ollama_url=args.ollama_url,
+                aider_command=args.aider_command,
+                test_command=test_command,
+                pass_number=review_pass + 1,
+                pass_total=args.review_passes,
+            )
+            if return_code != 0:
+                print(f"Aider revision failed with exit code {return_code}.", file=sys.stderr)
+                return return_code
 
     if not review or not review["approved"]:
-        print(
-            "Reviewer did not approve the change. The branch and working tree were left intact for inspection.",
-            file=sys.stderr,
-        )
+        print("Reviewer did not approve the change.", file=sys.stderr)
         return 2
 
     if args.no_commit:
@@ -519,13 +332,12 @@ def command_develop(args: argparse.Namespace) -> int:
     if commit.returncode != 0:
         print(commit.stdout)
         print(commit.stderr, file=sys.stderr)
-        print("Commit failed. Changes remain on the AI work branch for inspection.", file=sys.stderr)
         return commit.returncode or 1
 
     sha = git(repo, "rev-parse", "HEAD").stdout.strip()
     print(commit.stdout.strip())
     print(f"AI development complete: {branch} @ {sha}")
-    print("Nothing was pushed. Review the commit locally, then push/create a PR when ready.")
+    print("Nothing was pushed. Gina or a human may now push/create a PR.")
     return 0
 
 
@@ -537,27 +349,26 @@ def command_review(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Run the local InstaBounty AI developer/reviewer against a Git repository."
-    )
+    parser = argparse.ArgumentParser(description="Run Aider + Gemma against an InstaBounty repository.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    develop = subparsers.add_parser("develop", help="Implement, review, and optionally commit a development task.")
-    develop.add_argument("--repo", required=True, help="Path to the Git repository root.")
-    develop.add_argument("--task", required=True, help="Development task to implement.")
-    develop.add_argument("--base", default="main", help="Local base branch. Default: main")
-    develop.add_argument("--branch", help="Work branch. Must start with ai/ or feature/.")
+    develop = subparsers.add_parser("develop", help="Implement, review and optionally commit a task.")
+    develop.add_argument("--repo", required=True)
+    develop.add_argument("--task", required=True)
+    develop.add_argument("--base", default="main")
+    develop.add_argument("--branch")
     develop.add_argument("--model", default=DEFAULT_DEVELOPER_MODEL)
     develop.add_argument("--reviewer-model", default=DEFAULT_REVIEWER_MODEL)
     develop.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
-    develop.add_argument("--max-steps", type=int, default=30)
+    develop.add_argument("--aider-command", default=DEFAULT_AIDER_COMMAND)
+    develop.add_argument("--test-cmd")
     develop.add_argument("--review-passes", type=int, default=2)
-    develop.add_argument("--commit-message", help="Conventional commit message to use after approval.")
-    develop.add_argument("--no-commit", action="store_true", help="Leave approved changes uncommitted.")
+    develop.add_argument("--commit-message")
+    develop.add_argument("--no-commit", action="store_true")
     develop.set_defaults(func=command_develop)
 
-    review = subparsers.add_parser("review", help="Review the current repository diff without changing it.")
-    review.add_argument("--repo", required=True, help="Path to the Git repository root.")
+    review = subparsers.add_parser("review", help="Review the current repository diff only.")
+    review.add_argument("--repo", required=True)
     review.add_argument("--task", default="Review the current changes.")
     review.add_argument("--base", default="main")
     review.add_argument("--reviewer-model", default=DEFAULT_REVIEWER_MODEL)
