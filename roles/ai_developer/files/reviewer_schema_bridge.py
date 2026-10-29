@@ -8,6 +8,8 @@ import re
 from urllib import error, request
 
 
+MAX_REPOSITORY_CONTEXT = 12_000
+
 _REQUIREMENT_ITEM = {
     "type": "object",
     "additionalProperties": False,
@@ -21,7 +23,6 @@ _REQUIREMENT_ITEM = {
 
 
 def _contract_ids(messages: list[dict[str, str]]) -> list[str]:
-    """Extract the immutable R*/F* contract IDs from the reviewer payload."""
     ids: list[str] = []
     seen: set[str] = set()
     for message in messages:
@@ -38,10 +39,7 @@ def _review_schema(contract_ids: list[str]) -> dict:
     item = json.loads(json.dumps(_REQUIREMENT_ITEM))
     if contract_ids:
         item["properties"]["id"] = {"type": "string", "enum": contract_ids}
-    requirements: dict = {
-        "type": "array",
-        "items": item,
-    }
+    requirements: dict = {"type": "array", "items": item}
     if contract_ids:
         requirements["minItems"] = len(contract_ids)
         requirements["maxItems"] = len(contract_ids)
@@ -53,13 +51,46 @@ def _review_schema(contract_ids: list[str]) -> dict:
             "approved": {"type": "boolean"},
             "summary": {"type": "string"},
             "requirements": requirements,
-            "issues": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
+            "issues": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["approved", "summary", "requirements", "issues"],
     }
+
+
+def _prepare_reviewer_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    prepared: list[dict[str, str]] = []
+    evidence_found = False
+
+    for message in messages:
+        copied = dict(message)
+        content = copied.get("content", "")
+        repository_marker = "Repository file context:\n"
+        diff_marker = "\n\nProposed diff:\n"
+
+        if message.get("role") == "user" and repository_marker in content and diff_marker in content:
+            before_repository, remainder = content.split(repository_marker, 1)
+            repository_context, diff = remainder.rsplit(diff_marker, 1)
+            if not diff.strip():
+                raise ValueError("Reviewer payload contains an empty proposed diff.")
+
+            capped_context = repository_context[:MAX_REPOSITORY_CONTEXT]
+            copied["content"] = (
+                before_repository
+                + f"Proposed diff:\n{diff}\n\n"
+                + "Repository file context (supplemental, capped):\n"
+                + capped_context
+            )
+            evidence_found = True
+            print(
+                "Reviewer evidence: "
+                f"diff_chars={len(diff)}, repository_context_chars={len(capped_context)}."
+            )
+
+        prepared.append(copied)
+
+    if not evidence_found:
+        raise ValueError("Reviewer payload did not contain the expected proposed-diff evidence block.")
+    return prepared
 
 
 def _validate_contract(review: dict, contract_ids: list[str]) -> None:
@@ -121,7 +152,6 @@ def _request_review(
 
 
 def apply(namespace: dict, argv: list[str]) -> None:
-    """Replace the runner's reviewer Ollama call with strict structured output."""
     agent_error = namespace["AgentError"]
 
     def structured_ollama_chat(
@@ -130,19 +160,25 @@ def apply(namespace: dict, argv: list[str]) -> None:
         messages: list[dict[str, str]],
         timeout: int = 600,
     ) -> dict:
-        contract_ids = _contract_ids(messages)
         try:
-            return _request_review(url, model, messages, timeout, contract_ids)
+            prepared_messages = _prepare_reviewer_messages(messages)
+        except ValueError as exc:
+            raise agent_error(str(exc)) from exc
+
+        contract_ids = _contract_ids(prepared_messages)
+        try:
+            return _request_review(url, model, prepared_messages, timeout, contract_ids)
         except ValueError as first_error:
             first_detail = str(first_error)[:2000]
             exact_ids = ", ".join(contract_ids) if contract_ids else "the IDs supplied in the checklist"
             retry_messages = [
-                *messages,
+                *prepared_messages,
                 {
                     "role": "user",
                     "content": (
                         "Your previous reviewer response did not satisfy the required structured review contract. "
                         f"You MUST return exactly one requirements entry for every contract ID, in this exact order: {exact_ids}. "
+                        "Use the Proposed diff supplied above as the primary implementation evidence. "
                         "Each entry must contain id, satisfied, and non-empty concrete evidence. Return ONLY one JSON object "
                         "matching the supplied schema. Do not explain outside the JSON. Do not use Markdown or code fences."
                     ),
@@ -161,10 +197,6 @@ def apply(namespace: dict, argv: list[str]) -> None:
         except RuntimeError as exc:
             raise agent_error(str(exc)) from exc
 
-    # runpy can return a namespace mapping that is not the exact globals mapping
-    # retained by functions created while executing the runner. Patch both the
-    # exported namespace and run_reviewer's actual globals so reviewer calls are
-    # guaranteed to use the structured transport.
     namespace["ollama_chat"] = structured_ollama_chat
     run_reviewer = namespace.get("run_reviewer")
     if not callable(run_reviewer):
@@ -178,7 +210,16 @@ def apply(namespace: dict, argv: list[str]) -> None:
 
 
 def _self_test() -> None:
-    messages = [{"role": "user", "content": "Checklist:\nR1: first\nR2: second\nF1: feedback\n"}]
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Checklist:\nR1: first\nR2: second\nF1: feedback\n\n"
+                "Repository file context:\nfile-a\nfile-b\n\n"
+                "Proposed diff:\ndiff --git a/a b/a\n+change"
+            ),
+        }
+    ]
     ids = _contract_ids(messages)
     assert ids == ["R1", "R2", "F1"]
     schema = _review_schema(ids)
@@ -186,6 +227,12 @@ def _self_test() -> None:
     assert requirements["minItems"] == 3
     assert requirements["maxItems"] == 3
     assert requirements["items"]["properties"]["id"]["enum"] == ids
+
+    prepared = _prepare_reviewer_messages(messages)
+    content = prepared[0]["content"]
+    assert content.index("Proposed diff:") < content.index("Repository file context (supplemental, capped):")
+    assert "+change" in content
+
     _validate_contract(
         {
             "approved": True,
@@ -199,12 +246,22 @@ def _self_test() -> None:
         },
         ids,
     )
+
     try:
         _validate_contract({"requirements": []}, ids)
     except ValueError:
         pass
     else:
         raise AssertionError("empty reviewer checklist should fail contract validation")
+
+    try:
+        _prepare_reviewer_messages(
+            [{"role": "user", "content": "Repository file context:\nx\n\nProposed diff:\n"}]
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("empty proposed diff should fail reviewer payload validation")
 
 
 if __name__ == "__main__":
