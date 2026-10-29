@@ -86,9 +86,9 @@ def apply(namespace: dict, argv: list[str]) -> None:
                 {
                     "role": "user",
                     "content": (
-                        "Your previous response did not satisfy the required JSON response format. "
-                        "Return only the JSON object required by the supplied schema. Do not include "
-                        "reasoning, Markdown, code fences, introductions, or any text outside the JSON object."
+                        "Your previous response was not valid JSON. Return ONLY one JSON object matching "
+                        "the supplied schema. Do not explain. Do not use Markdown or code fences. Do not "
+                        "include reasoning, introductions, or any text before or after the JSON object."
                     ),
                 },
             ]
@@ -106,7 +106,20 @@ def apply(namespace: dict, argv: list[str]) -> None:
         except RuntimeError as exc:
             raise agent_error(str(exc)) from exc
 
+    # runpy can return a namespace mapping that is not the exact globals mapping
+    # retained by functions created while executing the runner. Patch both the
+    # exported namespace and run_reviewer's actual globals so reviewer calls are
+    # guaranteed to use the structured transport.
     namespace["ollama_chat"] = structured_ollama_chat
+    run_reviewer = namespace.get("run_reviewer")
+    if not callable(run_reviewer):
+        raise agent_error("Reviewer schema bridge could not locate run_reviewer.")
+    run_reviewer.__globals__["ollama_chat"] = structured_ollama_chat
+
+    if run_reviewer.__globals__.get("ollama_chat") is not structured_ollama_chat:
+        raise agent_error("Reviewer schema bridge failed to patch run_reviewer globals.")
+
+    print("Reviewer schema bridge active: structured Ollama transport installed.")
 
 
 def _self_test() -> None:
