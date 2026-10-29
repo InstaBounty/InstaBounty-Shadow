@@ -2,8 +2,8 @@
 """Runtime bridge for deterministic GitHub review cleanup.
 
 Loaded by the ai-dev Windows wrapper after ai_developer.py. It keeps the main
-runner focused on orchestration while enforcing mechanical review feedback
-without asking the coding model to perform Git bookkeeping.
+runner focused on orchestration while enforcing mechanical cleanup without
+asking the coding model to perform Git bookkeeping.
 """
 
 from __future__ import annotations
@@ -22,6 +22,15 @@ REMOVAL_TERMS = (
     "do not modify",
     "should not be changed",
 )
+
+DEFAULT_HOUSEKEEPING_FILES = {
+    ".gitignore",
+    ".gitattributes",
+    ".editorconfig",
+    ".aider.conf.yml",
+    ".aider.model.metadata.json",
+    ".aider.model.settings.yml",
+}
 
 
 def _argument(argv: list[str], name: str, default: str | None = None) -> str | None:
@@ -50,6 +59,28 @@ def removal_paths(requirements: list[dict[str, str]], files: list[str]) -> list[
     return matched
 
 
+def housekeeping_paths(task: str, files: list[str], housekeeping: set[str]) -> list[str]:
+    """Return unrelated tooling files that should never leak into feature work."""
+    original_task = task.split("GitHub review feedback", 1)[0].lower()
+    matched: list[str] = []
+    for path in files:
+        normalized = path.replace("\\", "/")
+        lowered = normalized.lower()
+        is_housekeeping = (
+            normalized in housekeeping
+            or lowered.startswith(".aider")
+            or lowered.startswith(".vscode/")
+            or lowered.startswith(".idea/")
+        )
+        if not is_housekeeping:
+            continue
+        basename = Path(normalized).name.lower()
+        if lowered in original_task or basename in original_task:
+            continue
+        matched.append(normalized)
+    return matched
+
+
 def _net_working_diff(globals_dict: dict[str, Any], repo: Path, base: str) -> str:
     git = globals_dict["git"]
     git(repo, "add", "-N", "--", ".", check=False)
@@ -71,10 +102,10 @@ def _restore_path(globals_dict: dict[str, Any], repo: Path, base: str, path: str
     git = globals_dict["git"]
     exists_in_base = git(repo, "cat-file", "-e", f"{base}:{path}", check=False).returncode == 0
     if exists_in_base:
-        git(repo, "restore", "--source", base, "--worktree", "--", path)
+        git(repo, "restore", "--source", base, "--staged", "--worktree", "--", path, check=False)
         return
 
-    git(repo, "rm", "-f", "--ignore-unmatch", "--", path, check=False)
+    git(repo, "rm", "-f", "--cached", "--ignore-unmatch", "--", path, check=False)
     target = repo / path
     if target.is_dir():
         shutil.rmtree(target, ignore_errors=True)
@@ -104,14 +135,25 @@ def apply(namespace: dict[str, Any], argv: list[str]) -> None:
     ) -> list[str]:
         requirements = globals_dict["github_review_requirements"](task)
         restores = removal_paths(requirements, files)
-        if restores:
-            for path, requirement_id in restores:
-                _restore_path(globals_dict, repo, base, path)
-                print(
-                    f"Deterministic cleanup: restored {path} to {base} "
-                    f"for GitHub review feedback {requirement_id}."
-                )
-            files = _net_changed_files(globals_dict, repo, base)
+        restored: set[str] = set()
+
+        for path, requirement_id in restores:
+            _restore_path(globals_dict, repo, base, path)
+            restored.add(path)
+            print(
+                f"Deterministic cleanup: restored {path} to {base} "
+                f"for GitHub review feedback {requirement_id}."
+            )
+
+        housekeeping = set(globals_dict.get("HOUSEKEEPING_FILES", set())) | DEFAULT_HOUSEKEEPING_FILES
+        current_files = _net_changed_files(globals_dict, repo, base)
+        for path in housekeeping_paths(task, current_files, housekeeping):
+            if path in restored:
+                continue
+            _restore_path(globals_dict, repo, base, path)
+            print(f"Deterministic cleanup: removed unrelated housekeeping change {path}.")
+
+        files = _net_changed_files(globals_dict, repo, base)
         return original_quality(
             repo,
             task,
@@ -130,6 +172,16 @@ def _self_test() -> None:
         {"id": "F6", "text": "Keep src/gateway/handler.py unchanged."},
     ]
     assert removal_paths(requirements, [".gitignore", "src/gateway/handler.py"]) == [(".gitignore", "F5")]
+    assert housekeeping_paths(
+        "Implement GET /ping",
+        [".gitignore", ".aider.input.history", "src/gateway/ping.py"],
+        DEFAULT_HOUSEKEEPING_FILES,
+    ) == [".gitignore", ".aider.input.history"]
+    assert housekeeping_paths(
+        "Update .gitignore for Aider",
+        [".gitignore"],
+        DEFAULT_HOUSEKEEPING_FILES,
+    ) == []
     print("Deterministic review cleanup self-test passed.")
 
 
