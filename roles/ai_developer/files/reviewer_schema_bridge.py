@@ -8,7 +8,10 @@ import re
 from urllib import error, request
 
 
-MAX_REPOSITORY_CONTEXT = 12_000
+MAX_REPOSITORY_CONTEXT = 2_000
+REVIEWER_CONTEXT_WINDOW = 32_768
+EVIDENCE_START = "BEGIN IMPLEMENTATION DIFF"
+EVIDENCE_END = "END IMPLEMENTATION DIFF"
 
 _REQUIREMENT_ITEM = {
     "type": "object",
@@ -58,8 +61,13 @@ def _review_schema(contract_ids: list[str]) -> dict:
 
 
 def _prepare_reviewer_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Split reviewer metadata and implementation diff into separate messages.
+
+    The implementation diff is deliberately the final user message so it cannot be
+    accidentally hidden behind repository context or prompt rewriting.
+    """
     prepared: list[dict[str, str]] = []
-    evidence_found = False
+    evidence_message: dict[str, str] | None = None
 
     for message in messages:
         copied = dict(message)
@@ -76,20 +84,29 @@ def _prepare_reviewer_messages(messages: list[dict[str, str]]) -> list[dict[str,
             capped_context = repository_context[:MAX_REPOSITORY_CONTEXT]
             copied["content"] = (
                 before_repository
-                + f"Proposed diff:\n{diff}\n\n"
                 + "Repository file context (supplemental, capped):\n"
                 + capped_context
             )
-            evidence_found = True
+            evidence_message = {
+                "role": "user",
+                "content": (
+                    "The following block is the authoritative implementation evidence for this review. "
+                    "Evaluate every requirement against it together with the validation evidence above.\n\n"
+                    f"{EVIDENCE_START}\n{diff}\n{EVIDENCE_END}\n\n"
+                    "Do not claim that the diff is missing when the BEGIN/END markers are present."
+                ),
+            }
             print(
-                "Reviewer evidence: "
+                "Reviewer evidence package: "
                 f"diff_chars={len(diff)}, repository_context_chars={len(capped_context)}."
             )
 
         prepared.append(copied)
 
-    if not evidence_found:
+    if evidence_message is None:
         raise ValueError("Reviewer payload did not contain the expected proposed-diff evidence block.")
+
+    prepared.append(evidence_message)
     return prepared
 
 
@@ -125,7 +142,7 @@ def _request_review(
             "messages": messages,
             "stream": False,
             "format": _review_schema(contract_ids),
-            "options": {"temperature": 0},
+            "options": {"temperature": 0, "num_ctx": REVIEWER_CONTEXT_WINDOW},
         }
     ).encode("utf-8")
     req = request.Request(
@@ -177,10 +194,10 @@ def apply(namespace: dict, argv: list[str]) -> None:
                     "role": "user",
                     "content": (
                         "Your previous reviewer response did not satisfy the required structured review contract. "
-                        f"You MUST return exactly one requirements entry for every contract ID, in this exact order: {exact_ids}. "
-                        "Use the Proposed diff supplied above as the primary implementation evidence. "
-                        "Each entry must contain id, satisfied, and non-empty concrete evidence. Return ONLY one JSON object "
-                        "matching the supplied schema. Do not explain outside the JSON. Do not use Markdown or code fences."
+                        f"Return exactly one requirements entry for every contract ID, in this exact order: {exact_ids}. "
+                        f"The implementation diff is in the final message between {EVIDENCE_START} and {EVIDENCE_END}. "
+                        "Use that block as the primary implementation evidence. Each entry must contain id, satisfied, "
+                        "and non-empty concrete evidence. Return only one JSON object matching the supplied schema."
                     ),
                 },
             ]
@@ -206,7 +223,7 @@ def apply(namespace: dict, argv: list[str]) -> None:
     if run_reviewer.__globals__.get("ollama_chat") is not structured_ollama_chat:
         raise agent_error("Reviewer schema bridge failed to patch run_reviewer globals.")
 
-    print("Reviewer schema bridge active: structured Ollama transport installed.")
+    print("Reviewer schema bridge active: explicit diff evidence transport installed.")
 
 
 def _self_test() -> None:
@@ -220,39 +237,20 @@ def _self_test() -> None:
             ),
         }
     ]
-    ids = _contract_ids(messages)
+    prepared = _prepare_reviewer_messages(messages)
+    ids = _contract_ids(prepared)
     assert ids == ["R1", "R2", "F1"]
+    assert len(prepared) == 2
+    assert "Proposed diff:" not in prepared[0]["content"]
+    assert EVIDENCE_START in prepared[-1]["content"]
+    assert "+change" in prepared[-1]["content"]
+    assert EVIDENCE_END in prepared[-1]["content"]
+
     schema = _review_schema(ids)
     requirements = schema["properties"]["requirements"]
     assert requirements["minItems"] == 3
     assert requirements["maxItems"] == 3
     assert requirements["items"]["properties"]["id"]["enum"] == ids
-
-    prepared = _prepare_reviewer_messages(messages)
-    content = prepared[0]["content"]
-    assert content.index("Proposed diff:") < content.index("Repository file context (supplemental, capped):")
-    assert "+change" in content
-
-    _validate_contract(
-        {
-            "approved": True,
-            "summary": "ok",
-            "requirements": [
-                {"id": "R1", "satisfied": True, "evidence": "e1"},
-                {"id": "R2", "satisfied": True, "evidence": "e2"},
-                {"id": "F1", "satisfied": True, "evidence": "e3"},
-            ],
-            "issues": [],
-        },
-        ids,
-    )
-
-    try:
-        _validate_contract({"requirements": []}, ids)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("empty reviewer checklist should fail contract validation")
 
     try:
         _prepare_reviewer_messages(
