@@ -1,5 +1,5 @@
 ---
 ollama_models:
   - qwen3-coder:30b
-  - gemma3:4b
+  - gpt-oss:20b
   - mxbai-embed-large
