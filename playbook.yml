@@ -40,7 +40,10 @@
     - postgresql
     - nvidia
     - ollama
-    - llm_models
+    - role: llm_models
+      tags:
+        - llm_models
+        - ai_developer
     - role: ai_developer
       tags:
         - ai_developer

@@ -47,15 +47,61 @@
     path: "{{ ai_developer_bin_dir }}"
     state: directory
 
-- name: Install AI developer runner
+- name: Install or update Aider
+  ansible.windows.win_command:
+    cmd: >-
+      uv tool install --force --python 3.12 --with pip
+      "{{ ai_developer_aider_package }}"
+  environment:
+    UV_TOOL_BIN_DIR: "{{ ai_developer_bin_dir }}"
+  register: ai_developer_aider_install
+  changed_when: >-
+    'Installed' in ai_developer_aider_install.stdout or
+    'Updated' in ai_developer_aider_install.stdout or
+    'Resolved' in ai_developer_aider_install.stdout
+
+- name: Verify Aider is available
+  ansible.windows.win_command:
+    cmd: '"{{ ai_developer_bin_dir }}\\aider.exe" --version'
+  changed_when: false
+
+- name: Install Aider-backed AI developer runner
   ansible.windows.win_copy:
     src: ai_developer.py
     dest: "{{ ai_developer_install_dir }}\\ai_developer.py"
 
-- name: Install AI developer system prompt
+- name: Install deterministic review cleanup bridge
   ansible.windows.win_copy:
-    src: developer_prompt.md
-    dest: "{{ ai_developer_install_dir }}\\developer_prompt.md"
+    src: review_cleanup_bridge.py
+    dest: "{{ ai_developer_install_dir }}\\review_cleanup_bridge.py"
+
+- name: Install structured reviewer schema bridge
+  ansible.windows.win_copy:
+    src: reviewer_schema_bridge.py
+    dest: "{{ ai_developer_install_dir }}\\reviewer_schema_bridge.py"
+
+- name: Calculate source AI developer runner checksum
+  ansible.builtin.stat:
+    path: "{{ role_path }}/files/ai_developer.py"
+    checksum_algorithm: sha256
+  register: ai_developer_source_runner
+  delegate_to: localhost
+  become: false
+
+- name: Calculate installed AI developer runner checksum
+  ansible.windows.win_stat:
+    path: "{{ ai_developer_install_dir }}\\ai_developer.py"
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: ai_developer_installed_runner
+
+- name: Validate installed AI developer runner checksum
+  ansible.builtin.assert:
+    that:
+      - ai_developer_source_runner.stat.checksum == ai_developer_installed_runner.stat.checksum
+    fail_msg: >-
+      Installed AI developer runner does not match the Ansible role source.
+      Refusing to continue with a stale runtime.
 
 - name: Install AI reviewer system prompt
   ansible.windows.win_copy:
@@ -86,9 +132,41 @@
       "{{ ai_developer_install_dir }}\\ai_developer.py"
   changed_when: false
 
+- name: Verify deterministic review cleanup bridge syntax
+  ansible.windows.win_command:
+    cmd: >-
+      py -3 -m py_compile
+      "{{ ai_developer_install_dir }}\\review_cleanup_bridge.py"
+  changed_when: false
+
+- name: Run deterministic review cleanup regression self-test
+  ansible.windows.win_command:
+    cmd: >-
+      py -3
+      "{{ ai_developer_install_dir }}\\review_cleanup_bridge.py"
+  changed_when: false
+
+- name: Verify structured reviewer schema bridge syntax
+  ansible.windows.win_command:
+    cmd: >-
+      py -3 -m py_compile
+      "{{ ai_developer_install_dir }}\\reviewer_schema_bridge.py"
+  changed_when: false
+
+- name: Run structured reviewer schema bridge self-test
+  ansible.windows.win_command:
+    cmd: >-
+      py -3
+      "{{ ai_developer_install_dir }}\\reviewer_schema_bridge.py"
+  changed_when: false
+
 - name: Display AI developer installation
   ansible.builtin.debug:
     msg:
-      - "AI developer model: {{ ai_developer_model }}"
+      - "Implementation agent: Aider + ollama_chat/{{ ai_developer_model }}"
       - "AI reviewer model: {{ ai_reviewer_model }}"
+      - "AI developer runner version: {{ ai_developer_runner_version }}"
+      - "Installed runner checksum verified against role source."
+      - "Deterministic review cleanup bridge verified."
+      - "Structured reviewer schema bridge verified."
       - "Run ai-dev --help from a new terminal after provisioning."
