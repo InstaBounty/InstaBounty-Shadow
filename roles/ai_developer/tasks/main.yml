@@ -75,6 +75,11 @@
     src: review_cleanup_bridge.py
     dest: "{{ ai_developer_install_dir }}\\review_cleanup_bridge.py"
 
+- name: Install bounded reviewer context bridge
+  ansible.windows.win_copy:
+    src: review_context_bridge.py
+    dest: "{{ ai_developer_install_dir }}\\review_context_bridge.py"
+
 - name: Install structured reviewer schema bridge
   ansible.windows.win_copy:
     src: reviewer_schema_bridge.py
@@ -146,6 +151,20 @@
       "{{ ai_developer_install_dir }}\\review_cleanup_bridge.py"
   changed_when: false
 
+- name: Verify bounded reviewer context bridge syntax
+  ansible.windows.win_command:
+    cmd: >-
+      py -3 -m py_compile
+      "{{ ai_developer_install_dir }}\\review_context_bridge.py"
+  changed_when: false
+
+- name: Run bounded reviewer context bridge self-test
+  ansible.windows.win_command:
+    cmd: >-
+      py -3
+      "{{ ai_developer_install_dir }}\\review_context_bridge.py"
+  changed_when: false
+
 - name: Verify structured reviewer schema bridge syntax
   ansible.windows.win_command:
     cmd: >-
@@ -168,5 +187,6 @@
       - "AI developer runner version: {{ ai_developer_runner_version }}"
       - "Installed runner checksum verified against role source."
       - "Deterministic review cleanup bridge verified."
+      - "Bounded reviewer context bridge verified."
       - "Structured reviewer schema bridge verified."
       - "Run ai-dev --help from a new terminal after provisioning."
