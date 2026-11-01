@@ -85,6 +85,11 @@
     src: reviewer_schema_bridge.py
     dest: "{{ ai_developer_install_dir }}\\reviewer_schema_bridge.py"
 
+- name: Install Aider editable seed bridge
+  ansible.windows.win_copy:
+    src: aider_seed_bridge.py
+    dest: "{{ ai_developer_install_dir }}\\aider_seed_bridge.py"
+
 - name: Calculate source AI developer runner checksum
   ansible.builtin.stat:
     path: "{{ role_path }}/files/ai_developer.py"
@@ -179,6 +184,20 @@
       "{{ ai_developer_install_dir }}\\reviewer_schema_bridge.py"
   changed_when: false
 
+- name: Verify Aider editable seed bridge syntax
+  ansible.windows.win_command:
+    cmd: >-
+      py -3 -m py_compile
+      "{{ ai_developer_install_dir }}\\aider_seed_bridge.py"
+  changed_when: false
+
+- name: Run Aider editable seed bridge self-test
+  ansible.windows.win_command:
+    cmd: >-
+      py -3
+      "{{ ai_developer_install_dir }}\\aider_seed_bridge.py"
+  changed_when: false
+
 - name: Display AI developer installation
   ansible.builtin.debug:
     msg:
@@ -189,4 +208,5 @@
       - "Deterministic review cleanup bridge verified."
       - "Bounded reviewer context bridge verified."
       - "Structured reviewer schema bridge verified."
+      - "Aider editable seed bridge verified."
       - "Run ai-dev --help from a new terminal after provisioning."
