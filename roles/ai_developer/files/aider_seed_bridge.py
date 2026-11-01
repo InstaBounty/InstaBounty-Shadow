@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed Aider with a bounded set of editable tracked repository files."""
+"""Seed Aider with a bounded set of editable repository files."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import subprocess
 from typing import Any, Callable
 
 MAX_SEED_FILES = 16
+WORKFLOW_SCAFFOLD = ".github/workflows/deploy-test-s3.yml"
 
 _PRIORITY_FILES = (
     "package.json",
@@ -39,10 +40,45 @@ def _tracked_files(repo: Path) -> list[str]:
     return [line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()]
 
 
-def seed_files(repo: Path) -> list[str]:
+def _needs_workflow_scaffold(task: str) -> bool:
+    lowered = task.lower()
+    asks_for_workflow = "github actions" in lowered or "workflow" in lowered
+    asks_for_s3 = "s3" in lowered
+    return asks_for_workflow and asks_for_s3
+
+
+def _ensure_workflow_scaffold(repo: Path, task: str) -> str | None:
+    if not _needs_workflow_scaffold(task):
+        return None
+
+    existing = [
+        path
+        for path in _tracked_files(repo)
+        if path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))
+    ]
+    if existing:
+        return None
+
+    path = repo / WORKFLOW_SCAFFOLD
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(
+            "# AI scaffold: replace this placeholder with the requested S3 test deployment workflow.\n",
+            encoding="utf-8",
+            newline="",
+        )
+        print(f"Aider workflow scaffold created: {WORKFLOW_SCAFFOLD}")
+    return WORKFLOW_SCAFFOLD
+
+
+def seed_files(repo: Path, task: str = "") -> list[str]:
     tracked = _tracked_files(repo)
     tracked_set = set(tracked)
     selected: list[str] = []
+
+    scaffold = _ensure_workflow_scaffold(repo, task)
+    if scaffold is not None:
+        selected.append(scaffold)
 
     for path in _PRIORITY_FILES:
         if path in tracked_set and path not in selected:
@@ -86,7 +122,8 @@ def apply(namespace: dict[str, Any], argv: list[str] | None = None) -> None:
     original_popen = subprocess_module.Popen
 
     def run_aider_with_seed(repo: Path, **kwargs: Any) -> int:
-        seeds = seed_files(Path(repo))
+        task = str(kwargs.get("task", ""))
+        seeds = seed_files(Path(repo), task)
         if seeds:
             print("Aider editable seed files: " + ", ".join(seeds))
         else:
@@ -109,6 +146,8 @@ def apply(namespace: dict[str, Any], argv: list[str] | None = None) -> None:
 def _self_test() -> None:
     assert _is_aider_command(["aider.exe", "--version"])
     assert not _is_aider_command(["git", "status"])
+    assert _needs_workflow_scaffold("Add a GitHub Actions workflow to deploy to S3")
+    assert not _needs_workflow_scaffold("Update the health endpoint")
     assert MAX_SEED_FILES > 0
 
 
