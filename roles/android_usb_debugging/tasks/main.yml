@@ -1,0 +1,87 @@
+---
+# Google Pixel ADB USB driver. The Android role provisions C:\Android\Sdk first.
+- name: Verify Android SDK Manager and ADB are available
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $sdk = 'C:\Android\Sdk'
+      $sdkmanager = Join-Path $sdk 'cmdline-tools\latest\bin\sdkmanager.bat'
+      $adb = Join-Path $sdk 'platform-tools\adb.exe'
+      foreach ($file in @($sdkmanager, $adb)) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+          throw "Android tool missing: $file. Run the full android role first."
+        }
+      }
+      $Ansible.Result = @{ sdkmanager = $sdkmanager; adb = $adb }
+
+- name: Install official Google USB Driver using Android SDK Manager
+  ansible.windows.win_powershell:
+    script: |
+      $sdk = 'C:\Android\Sdk'
+      $sdkmanager = Join-Path $sdk 'cmdline-tools\latest\bin\sdkmanager.bat'
+      $inf = Join-Path $sdk 'extras\google\usb_driver\android_winusb.inf'
+      $Ansible.Changed = $false
+
+      if (-not (Test-Path -LiteralPath $inf -PathType Leaf)) {
+        & $sdkmanager "--sdk_root=$sdk" --install 'extras;google;usb_driver' | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+          throw "Android SDK Manager failed to download the Google USB Driver (exit $LASTEXITCODE)."
+        }
+        if (-not (Test-Path -LiteralPath $inf -PathType Leaf)) {
+          throw "Google USB Driver INF not found at $inf after SDK Manager install."
+        }
+        $Ansible.Changed = $true
+      }
+      $Ansible.Result = @{ driver_inf = $inf }
+
+- name: Stage Google USB Driver in Windows Driver Store
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $inf = 'C:\Android\Sdk\extras\google\usb_driver\android_winusb.inf'
+      $existing = @(Get-WindowsDriver -Online -ErrorAction Stop | Where-Object {
+        $_.OriginalFileName -and
+        ([IO.Path]::GetFileName($_.OriginalFileName) -ieq 'android_winusb.inf')
+      })
+
+      if ($existing.Count -eq 0) {
+        # /install associates the driver with a compatible forwarded Pixel if attached;
+        # otherwise the signed driver remains staged for a later connection.
+        $output = & "$env:SystemRoot\System32\pnputil.exe" /add-driver $inf /install 2>&1
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to stage Google USB Driver: $($output -join ' ')"
+        }
+        $Ansible.Changed = $true
+      }
+
+      $Ansible.Result = @{
+        staged = $true
+        driver_inf = $inf
+        already_present = ($existing.Count -gt 0)
+      }
+
+- name: Verify ADB and display currently attached Android devices
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $adb = 'C:\Android\Sdk\platform-tools\adb.exe'
+      $version = & $adb version
+      if ($LASTEXITCODE -ne 0) { throw 'adb version failed.' }
+      $devices = & $adb devices -l
+      if ($LASTEXITCODE -ne 0) { throw 'adb devices -l failed.' }
+      # No device is expected during provisioning; forwarding requires user action.
+      $Ansible.Result = @{
+        version = ($version | Select-Object -First 1)
+        devices = @($devices)
+      }
+  register: pixel_adb_verification
+
+- name: Report Pixel USB debugging readiness
+  ansible.builtin.debug:
+    msg:
+      - "{{ pixel_adb_verification.result.version }}"
+      - "Google Pixel USB driver staged on Shadow."
+      - "Detected devices: {{ pixel_adb_verification.result.devices | join(' | ') }}"
+      - "Forward the Pixel from the physical PC via Shadow Quick Menu > Controllers & USB."
+      - "On the Pixel, enable Developer options > USB debugging and accept the RSA prompt."
+      - "If no phone is present, this is normal until USB forwarding is enabled."
