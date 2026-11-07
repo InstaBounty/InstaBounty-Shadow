@@ -147,6 +147,8 @@ Hardhat is installed on a project-by-project basis rather than globally.
 - Android SDK
 - Android platform tools
 - adb
+- Google USB Driver for Pixel USB debugging (staged in the Windows Driver Store)
+- Pixel USB/ADB diagnostic script
 - Android build tools
 - Android Studio
 
@@ -305,6 +307,37 @@ ansible-playbook -i inventory.yml playbook.yml --tags postman
 ```
 
 Because the final reboot task is not tagged `postman`, this command only runs the Postman role and does not reboot the workstation afterward.
+
+### Configure Pixel USB debugging on Shadow
+
+The `android_usb_debugging` role runs after the Android SDK role in the full playbook. It downloads the **official Google USB Driver** with Android's SDK Manager (`extras;google;usb_driver`), stages its signed INF using Windows `pnputil`, and verifies `adb` without requiring a Pixel to be attached during provisioning. The role is safe to rerun and does not forcibly replace unrelated or existing OEM drivers.
+
+If Android Studio and ADB are already installed, run only this new role from Ubuntu/WSL on your Ansible control PC:
+
+```bash
+ansible-playbook -i inventory.yml playbook.yml --tags android_usb_debugging
+```
+
+Afterwards, inside **Shadow Windows**, run:
+
+```powershell
+powershell -NoProfile -File C:\\InstaBounty\\tools\\check-pixel-usb.ps1
+adb devices -l
+```
+
+The diagnostic script reports ADB version, whether the Google driver is present and staged, attached ADB devices, and whether a Google USB device (vendor ID 18D1) is visible in the Shadow VM. No phone connected is not a provisioning failure.
+
+**The Shadow client USB-forwarding driver must be installed on your physical PC, not the Shadow VM.** On the physical PC open the Shadow launcher, go to **Settings → Controllers & USB → Install drivers**, and restart that PC if prompted. Connect the Pixel using a data-capable USB cable, start Shadow and select the phone in **Quick Menu → Controllers & USB**. On the Pixel enable **Settings → System → Developer options → USB debugging**, unlock the phone and accept the RSA debugging authorization prompt.
+
+A Pixel that does not appear in `adb devices -l` is usually a forwarding, cable, authorization or Windows device binding issue; Ansible cannot force the physical host to forward a USB device. Keep USB debugging disabled when not in use, and only authorize trusted computers. Do not expose ADB debugging ports publicly.
+
+Once the Pixel shows state `device`:
+
+```powershell
+cd C:\\Users\\Shadow\\instabounty\\instabounty-android
+gradle installDebug
+gradle connectedDebugAndroidTest
+```
 
 ### Install only ElasticMQ
 
