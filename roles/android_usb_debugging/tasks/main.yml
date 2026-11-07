@@ -85,3 +85,13 @@
       - "Forward the Pixel from the physical PC via Shadow Quick Menu > Controllers & USB."
       - "On the Pixel, enable Developer options > USB debugging and accept the RSA prompt."
       - "If no phone is present, this is normal until USB forwarding is enabled."
+
+- name: Create InstaBounty Android diagnostics directory
+  ansible.windows.win_file:
+    path: 'C:\\InstaBounty\\tools'
+    state: directory
+
+- name: Install Pixel USB debugging diagnostic script
+  ansible.windows.win_copy:
+    src: check-pixel-usb.ps1
+    dest: 'C:\\InstaBounty\\tools\\check-pixel-usb.ps1'
