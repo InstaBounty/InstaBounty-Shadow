@@ -321,7 +321,7 @@ ansible-playbook -i inventory.yml playbook.yml --tags android_usb_debugging
 Afterwards, inside **Shadow Windows**, run:
 
 ```powershell
-powershell -NoProfile -File C:\\InstaBounty\\tools\\check-pixel-usb.ps1
+powershell -NoProfile -File C:\InstaBounty\tools\check-pixel-usb.ps1
 adb devices -l
 ```
 
@@ -334,7 +334,7 @@ A Pixel that does not appear in `adb devices -l` is usually a forwarding, cable,
 Once the Pixel shows state `device`:
 
 ```powershell
-cd C:\\Users\\Shadow\\instabounty\\instabounty-android
+cd C:\Users\Shadow\instabounty\instabounty-android
 gradle installDebug
 gradle connectedDebugAndroidTest
 ```
