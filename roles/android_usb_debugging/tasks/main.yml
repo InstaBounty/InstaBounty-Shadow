@@ -34,6 +34,66 @@
       }
       $Ansible.Result = @{ driver_inf = $inf }
 
+- name: Validate and trust Google's signed ADB driver publisher
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $catalog = 'C:\Android\Sdk\extras\google\usb_driver\androidwinusba64.cat'
+      if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
+        throw "Missing official Android USB driver catalog: $catalog"
+      }
+
+      # Verify the actual catalog, not a downloaded or hardcoded certificate.
+      # Do not modify Trusted Root, disable driver-signing checks, or use test signing.
+      $signature = Get-AuthenticodeSignature -LiteralPath $catalog -ErrorAction Stop
+      $signer = $signature.SignerCertificate
+      if ($signature.Status -ne 'Valid' -or $null -eq $signer) {
+        throw "Google USB driver catalog signature is $($signature.Status). Refusing to trust the publisher or install the driver. Check the system trust chain and Windows Update."
+      }
+      if ($signer.Subject -notmatch '(?:^|,\s*)(?:CN|O)=Google (?:LLC|Inc\.?)(?:,|$)') {
+        throw "USB driver catalog is not signed by the expected Google publisher: $($signer.Subject)"
+      }
+      $now = Get-Date
+      if ($now -lt $signer.NotBefore -or $now -gt $signer.NotAfter) {
+        # A timestamped, valid Authenticode signature can outlive the signing
+        # certificate; Windows decides whether that catalog remains valid.
+        # This check is informational, not a reason to disable signature checks.
+        $certificateExpired = $true
+      } else {
+        $certificateExpired = $false
+      }
+
+      $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+        'TrustedPublisher', 'LocalMachine'
+      )
+      try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        $present = @($store.Certificates | Where-Object {
+          $_.Thumbprint -eq $signer.Thumbprint
+        }).Count -gt 0
+        if (-not $present) {
+          $store.Add($signer)
+          $Ansible.Changed = $true
+        }
+      } finally {
+        $store.Close()
+      }
+
+      $Ansible.Result = @{
+        subject = $signer.Subject
+        thumbprint = $signer.Thumbprint
+        signature_status = "$($signature.Status)"
+        signing_certificate_currently_expired = $certificateExpired
+      }
+  register: google_usb_publisher
+
+- name: Report validated driver signing publisher
+  ansible.builtin.debug:
+    msg:
+      - "Google USB catalog signature: {{ google_usb_publisher.result.signature_status }}"
+      - "Signer: {{ google_usb_publisher.result.subject }}"
+      - "Signer thumbprint: {{ google_usb_publisher.result.thumbprint }}"
+
 - name: Stage Google USB Driver in Windows Driver Store
   ansible.windows.win_powershell:
     script: |
@@ -45,11 +105,11 @@
       })
 
       if ($existing.Count -eq 0) {
-        # /install associates the driver with a compatible forwarded Pixel if attached;
-        # otherwise the signed driver remains staged for a later connection.
+        # Driver signing remains enabled. Only a valid Google-signed catalog
+        # whose publisher has been explicitly trusted by this role is staged.
         $output = & "$env:SystemRoot\System32\pnputil.exe" /add-driver $inf /install 2>&1
         if ($LASTEXITCODE -ne 0) {
-          throw "Failed to stage Google USB Driver: $($output -join ' ')"
+          throw "Windows refused the signed Google USB driver (exit $LASTEXITCODE): $($output -join ' '). Check C:\Windows\INF\setupapi.dev.log; do not disable driver-signature enforcement."
         }
         $Ansible.Changed = $true
       }
