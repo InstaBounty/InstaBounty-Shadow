@@ -310,7 +310,7 @@ Because the final reboot task is not tagged `postman`, this command only runs th
 
 ### Configure Pixel USB debugging on Shadow
 
-The `android_usb_debugging` role runs after the Android SDK role in the full playbook. It downloads the **official Google USB Driver** with Android's SDK Manager (`extras;google;usb_driver`), stages its signed INF using Windows `pnputil`, and verifies `adb` without requiring a Pixel to be attached during provisioning. The role is safe to rerun and does not forcibly replace unrelated or existing OEM drivers.
+The `android_usb_debugging` role runs after the Android SDK role in the full playbook. It downloads the **official Google USB Driver** with Android's SDK Manager (`extras;google;usb_driver`), verifies the Authenticode signature and Google signer on the driver's catalog, adds that verified **signing certificate only** to the local machine's Trusted Publishers store if not already present, then stages its INF using Windows `pnputil`. It verifies `adb` without requiring a Pixel to be attached during provisioning. No root CA is added, and driver-signature enforcement stays enabled. The role is safe to rerun and does not forcibly replace unrelated or existing OEM drivers.
 
 If Android Studio and ADB are already installed, run only this new role from Ubuntu/WSL on your Ansible control PC:
 
@@ -325,7 +325,9 @@ powershell -NoProfile -File C:\InstaBounty\tools\check-pixel-usb.ps1
 adb devices -l
 ```
 
-The diagnostic script reports ADB version, whether the Google driver is present and staged, attached ADB devices, and whether a Google USB device (vendor ID 18D1) is visible in the Shadow VM. No phone connected is not a provisioning failure.
+The diagnostic script reports ADB version, whether the Google driver is present and staged, attached ADB devices, and whether a Google USB device (vendor ID 18D1) is visible in the Shadow VM.
+
+If `pnputil` reports **publisher not established as trusted**, pull PR #10's latest changes and rerun the role. If catalog signature verification fails, the playbook stops rather than trusting an unverified driver. Because trusting a publisher permits subsequent packages signed by that certificate to install without a prompt, review the reported signer and thumbprint before using this on any workstation outside your dedicated development VM. Windows may still reject a driver under newer kernel signing policies, in which case inspect `C:\Windows\INF\setupapi.dev.log` rather than weakening driver security. No phone connected is not a provisioning failure.
 
 **The Shadow client USB-forwarding driver must be installed on your physical PC, not the Shadow VM.** On the physical PC open the Shadow launcher, go to **Settings → Controllers & USB → Install drivers**, and restart that PC if prompted. Connect the Pixel using a data-capable USB cable, start Shadow and select the phone in **Quick Menu → Controllers & USB**. On the Pixel enable **Settings → System → Developer options → USB debugging**, unlock the phone and accept the RSA debugging authorization prompt.
 
