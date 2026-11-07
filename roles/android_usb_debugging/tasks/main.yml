@@ -88,10 +88,10 @@
 
 - name: Create InstaBounty Android diagnostics directory
   ansible.windows.win_file:
-    path: 'C:\\InstaBounty\\tools'
+    path: 'C:\InstaBounty\tools'
     state: directory
 
 - name: Install Pixel USB debugging diagnostic script
   ansible.windows.win_copy:
     src: check-pixel-usb.ps1
-    dest: 'C:\\InstaBounty\\tools\\check-pixel-usb.ps1'
+    dest: 'C:\InstaBounty\tools\check-pixel-usb.ps1'
