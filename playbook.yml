@@ -37,6 +37,9 @@
       tags:
         - elasticmq
     - android
+    - role: android_usb_debugging
+      tags:
+        - android_usb_debugging
     - postgresql
     - nvidia
     - ollama

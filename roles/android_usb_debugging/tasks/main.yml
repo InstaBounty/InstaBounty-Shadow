@@ -1,0 +1,220 @@
+---
+# Google Pixel ADB USB driver. The Android role provisions C:\Android\Sdk first.
+- name: Verify Android SDK Manager and ADB are available
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $sdk = 'C:\Android\Sdk'
+      $sdkmanager = Join-Path $sdk 'cmdline-tools\latest\bin\sdkmanager.bat'
+      $adb = Join-Path $sdk 'platform-tools\adb.exe'
+      foreach ($file in @($sdkmanager, $adb)) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+          throw "Android tool missing: $file. Run the full android role first."
+        }
+      }
+      $Ansible.Result = @{ sdkmanager = $sdkmanager; adb = $adb }
+
+- name: Install official Google USB Driver using Android SDK Manager
+  ansible.windows.win_powershell:
+    script: |
+      $sdk = 'C:\Android\Sdk'
+      $sdkmanager = Join-Path $sdk 'cmdline-tools\latest\bin\sdkmanager.bat'
+      $inf = Join-Path $sdk 'extras\google\usb_driver\android_winusb.inf'
+      $Ansible.Changed = $false
+
+      if (-not (Test-Path -LiteralPath $inf -PathType Leaf)) {
+        & $sdkmanager "--sdk_root=$sdk" --install 'extras;google;usb_driver' | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+          throw "Android SDK Manager failed to download the Google USB Driver (exit $LASTEXITCODE)."
+        }
+        if (-not (Test-Path -LiteralPath $inf -PathType Leaf)) {
+          throw "Google USB Driver INF not found at $inf after SDK Manager install."
+        }
+        $Ansible.Changed = $true
+      }
+      $Ansible.Result = @{ driver_inf = $inf }
+
+- name: Validate and trust Google's signed ADB driver publisher
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $catalog = 'C:\Android\Sdk\extras\google\usb_driver\androidwinusba64.cat'
+      if (-not (Test-Path -LiteralPath $catalog -PathType Leaf)) {
+        throw "Missing official Android USB driver catalog: $catalog"
+      }
+
+      # Verify the actual catalog, not a downloaded or hardcoded certificate.
+      # Do not modify Trusted Root, disable driver-signing checks, or use test signing.
+      $signature = Get-AuthenticodeSignature -LiteralPath $catalog -ErrorAction Stop
+      $signer = $signature.SignerCertificate
+      if ($signature.Status -ne 'Valid' -or $null -eq $signer) {
+        throw "Google USB driver catalog signature is $($signature.Status). Refusing to trust the publisher or install the driver. Check the system trust chain and Windows Update."
+      }
+      if ($signer.Subject -notmatch '(?:^|,\s*)(?:CN|O)=Google (?:LLC|Inc\.?)(?:,|$)') {
+        throw "USB driver catalog is not signed by the expected Google publisher: $($signer.Subject)"
+      }
+      $now = Get-Date
+      if ($now -lt $signer.NotBefore -or $now -gt $signer.NotAfter) {
+        # A timestamped, valid Authenticode signature can outlive the signing
+        # certificate; Windows decides whether that catalog remains valid.
+        # This check is informational, not a reason to disable signature checks.
+        $certificateExpired = $true
+      } else {
+        $certificateExpired = $false
+      }
+
+      $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+        'TrustedPublisher', 'LocalMachine'
+      )
+      try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        $present = @($store.Certificates | Where-Object {
+          $_.Thumbprint -eq $signer.Thumbprint
+        }).Count -gt 0
+        if (-not $present) {
+          $store.Add($signer)
+          $Ansible.Changed = $true
+        }
+      } finally {
+        $store.Close()
+      }
+
+      $Ansible.Result = @{
+        subject = $signer.Subject
+        thumbprint = $signer.Thumbprint
+        signature_status = "$($signature.Status)"
+        signing_certificate_currently_expired = $certificateExpired
+      }
+  register: google_usb_publisher
+
+- name: Report validated driver signing publisher
+  ansible.builtin.debug:
+    msg:
+      - "Google USB catalog signature: {{ google_usb_publisher.result.signature_status }}"
+      - "Signer: {{ google_usb_publisher.result.subject }}"
+      - "Signer thumbprint: {{ google_usb_publisher.result.thumbprint }}"
+
+- name: Stage Google USB Driver in Windows Driver Store
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $inf = 'C:\Android\Sdk\extras\google\usb_driver\android_winusb.inf'
+      $existing = @(Get-WindowsDriver -Online -ErrorAction Stop | Where-Object {
+        $_.OriginalFileName -and
+        ([IO.Path]::GetFileName($_.OriginalFileName) -ieq 'android_winusb.inf')
+      })
+
+      if ($existing.Count -eq 0) {
+        # Driver signing remains enabled. Only a valid Google-signed catalog
+        # whose publisher has been explicitly trusted by this role is staged.
+        $output = & "$env:SystemRoot\System32\pnputil.exe" /add-driver $inf /install 2>&1
+        if ($LASTEXITCODE -ne 0) {
+          throw "Windows refused the signed Google USB driver (exit $LASTEXITCODE): $($output -join ' '). Check C:\Windows\INF\setupapi.dev.log; do not disable driver-signature enforcement."
+        }
+        $Ansible.Changed = $true
+      }
+
+      $Ansible.Result = @{
+        staged = $true
+        driver_inf = $inf
+        already_present = ($existing.Count -gt 0)
+      }
+
+- name: Verify ADB with a bounded, detached process for WinRM
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $adb = 'C:\Android\Sdk\platform-tools\adb.exe'
+      # ADB starts a long-lived server which can inherit WinRM's output handles.
+      # Start-Process redirects to files, keeping the server away from Ansible's
+      # remoting stream; WaitForExit prevents indefinite USB/ADB startup hangs.
+      function Invoke-AdbBounded {
+        param(
+          [string[]]$Arguments,
+          [int]$TimeoutSeconds = 20
+        )
+        $stdout = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + '.adb.out')
+        $stderr = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + '.adb.err')
+        $process = $null
+        try {
+          $process = Start-Process -FilePath $adb -ArgumentList $Arguments `
+            -PassThru `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            $process.WaitForExit(5000) | Out-Null
+            return @{
+              status = 'timeout'
+              exit_code = $null
+              lines = @()
+              detail = "adb $($Arguments -join ' ') exceeded $TimeoutSeconds seconds"
+            }
+          }
+          $outLines = @(Get-Content -LiteralPath $stdout -ErrorAction SilentlyContinue)
+          $errLines = @(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue)
+          return @{
+            status = if ($process.ExitCode -eq 0) { 'ok' } else { 'failed' }
+            exit_code = $process.ExitCode
+            lines = $outLines
+            detail = ($errLines -join ' ')
+          }
+        } finally {
+          Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+          if ($null -ne $process) { $process.Dispose() }
+        }
+      }
+
+      # 'adb version' never contacts the daemon or enumerates devices.
+      # Run it directly: the original WinRM task completed this check and
+      # the detached invocation can exit non-zero with no diagnostic output.
+      $versionLines = @(& $adb version)
+      $versionExitCode = $LASTEXITCODE
+      if ($versionExitCode -ne 0) {
+        throw "adb version exited $versionExitCode. Output: $($versionLines -join ' ')"
+      }
+
+      # Device enumeration is optional; failure to see a forwarded phone must
+      # not block driver installation or suppress the actual ADB diagnostic.
+      try {
+        $devices = Invoke-AdbBounded -Arguments @('devices', '-l') -TimeoutSeconds 20
+      } catch {
+        $devices = @{
+          status = 'failed'
+          exit_code = $null
+          lines = @()
+          detail = $_.Exception.Message
+        }
+      }
+      if ($devices.status -ne 'ok') {
+        Write-Warning ("ADB device enumeration {0} (exit code: {1}): {2}" -f
+          $devices.status, $devices.exit_code, $devices.detail)
+      }
+      $Ansible.Result = @{
+        version = ($versionLines | Select-Object -First 1)
+        devices = @($devices.lines)
+        device_query_status = $devices.status
+        device_query_exit_code = $devices.exit_code
+        device_query_detail = $devices.detail
+      }
+  register: pixel_adb_verification
+
+- name: Report Pixel USB debugging readiness
+  ansible.builtin.debug:
+    msg:
+      - "{{ pixel_adb_verification.result.version }}"
+      - "Google Pixel USB driver staged on Shadow."
+      - "ADB device query status: {{ pixel_adb_verification.result.device_query_status }}"
+      - "Detected devices: {{ pixel_adb_verification.result.devices | join(' | ') }}"
+      - "Forward the Pixel from the physical PC via Shadow Quick Menu > Controllers & USB."
+      - "On the Pixel, enable Developer options > USB debugging and accept the RSA prompt."
+      - "If no phone is present, this is normal until USB forwarding is enabled."
+
+- name: Create InstaBounty Android diagnostics directory
+  ansible.windows.win_file:
+    path: 'C:\InstaBounty\tools'
+    state: directory
+
+- name: Install Pixel USB debugging diagnostic script
+  ansible.windows.win_copy:
+    src: check-pixel-usb.ps1
+    dest: 'C:\InstaBounty\tools\check-pixel-usb.ps1'
