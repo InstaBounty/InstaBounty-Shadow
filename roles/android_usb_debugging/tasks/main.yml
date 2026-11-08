@@ -120,19 +120,65 @@
         already_present = ($existing.Count -gt 0)
       }
 
-- name: Verify ADB and display currently attached Android devices
+- name: Verify ADB with a bounded, detached process for WinRM
   ansible.windows.win_powershell:
     script: |
       $Ansible.Changed = $false
       $adb = 'C:\Android\Sdk\platform-tools\adb.exe'
-      $version = & $adb version
-      if ($LASTEXITCODE -ne 0) { throw 'adb version failed.' }
-      $devices = & $adb devices -l
-      if ($LASTEXITCODE -ne 0) { throw 'adb devices -l failed.' }
-      # No device is expected during provisioning; forwarding requires user action.
+      # ADB starts a long-lived server which can inherit WinRM's output handles.
+      # Start-Process redirects to files, keeping the server away from Ansible's
+      # remoting stream; WaitForExit prevents indefinite USB/ADB startup hangs.
+      function Invoke-AdbBounded {
+        param(
+          [string[]]$Arguments,
+          [int]$TimeoutSeconds = 20
+        )
+        $stdout = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + '.adb.out')
+        $stderr = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + '.adb.err')
+        $process = $null
+        try {
+          $process = Start-Process -FilePath $adb -ArgumentList $Arguments `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            $process.WaitForExit(5000) | Out-Null
+            return @{
+              status = 'timeout'
+              exit_code = $null
+              lines = @()
+              detail = "adb $($Arguments -join ' ') exceeded $TimeoutSeconds seconds"
+            }
+          }
+          $outLines = @(Get-Content -LiteralPath $stdout -ErrorAction SilentlyContinue)
+          $errLines = @(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue)
+          return @{
+            status = if ($process.ExitCode -eq 0) { 'ok' } else { 'failed' }
+            exit_code = $process.ExitCode
+            lines = $outLines
+            detail = ($errLines -join ' ')
+          }
+        } finally {
+          Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+          if ($null -ne $process) { $process.Dispose() }
+        }
+      }
+
+      $version = Invoke-AdbBounded -Arguments @('version') -TimeoutSeconds 15
+      if ($version.status -ne 'ok') {
+        throw "ADB version check failed ($($version.status)): $($version.detail)"
+      }
+      $devices = Invoke-AdbBounded -Arguments @('devices', '-l') -TimeoutSeconds 20
+      if ($devices.status -ne 'ok') {
+        # Device enumeration is diagnostic only. No phone is required to finish
+        # provisioning. A hung ADB server must not block the entire playbook.
+        Write-Warning "ADB device enumeration $($devices.status): $($devices.detail)"
+      }
       $Ansible.Result = @{
-        version = ($version | Select-Object -First 1)
-        devices = @($devices)
+        version = ($version.lines | Select-Object -First 1)
+        devices = @($devices.lines)
+        device_query_status = $devices.status
+        device_query_detail = $devices.detail
       }
   register: pixel_adb_verification
 
