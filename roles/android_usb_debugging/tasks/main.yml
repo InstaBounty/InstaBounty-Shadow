@@ -138,7 +138,7 @@
         $process = $null
         try {
           $process = Start-Process -FilePath $adb -ArgumentList $Arguments `
-            -PassThru -NoNewWindow `
+            -PassThru `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             try { $process.Kill() } catch { }
@@ -187,6 +187,7 @@
     msg:
       - "{{ pixel_adb_verification.result.version }}"
       - "Google Pixel USB driver staged on Shadow."
+      - "ADB device query status: {{ pixel_adb_verification.result.device_query_status }}"
       - "Detected devices: {{ pixel_adb_verification.result.devices | join(' | ') }}"
       - "Forward the Pixel from the physical PC via Shadow Quick Menu > Controllers & USB."
       - "On the Pixel, enable Developer options > USB debugging and accept the RSA prompt."
