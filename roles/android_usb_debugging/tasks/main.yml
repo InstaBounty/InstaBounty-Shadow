@@ -164,20 +164,36 @@
         }
       }
 
-      $version = Invoke-AdbBounded -Arguments @('version') -TimeoutSeconds 15
-      if ($version.status -ne 'ok') {
-        throw "ADB version check failed ($($version.status)): $($version.detail)"
+      # 'adb version' never contacts the daemon or enumerates devices.
+      # Run it directly: the original WinRM task completed this check and
+      # the detached invocation can exit non-zero with no diagnostic output.
+      $versionLines = @(& $adb version)
+      $versionExitCode = $LASTEXITCODE
+      if ($versionExitCode -ne 0) {
+        throw "adb version exited $versionExitCode. Output: $($versionLines -join ' ')"
       }
-      $devices = Invoke-AdbBounded -Arguments @('devices', '-l') -TimeoutSeconds 20
+
+      # Device enumeration is optional; failure to see a forwarded phone must
+      # not block driver installation or suppress the actual ADB diagnostic.
+      try {
+        $devices = Invoke-AdbBounded -Arguments @('devices', '-l') -TimeoutSeconds 20
+      } catch {
+        $devices = @{
+          status = 'failed'
+          exit_code = $null
+          lines = @()
+          detail = $_.Exception.Message
+        }
+      }
       if ($devices.status -ne 'ok') {
-        # Device enumeration is diagnostic only. No phone is required to finish
-        # provisioning. A hung ADB server must not block the entire playbook.
-        Write-Warning "ADB device enumeration $($devices.status): $($devices.detail)"
+        Write-Warning ("ADB device enumeration {0} (exit code: {1}): {2}" -f
+          $devices.status, $devices.exit_code, $devices.detail)
       }
       $Ansible.Result = @{
-        version = ($version.lines | Select-Object -First 1)
+        version = ($versionLines | Select-Object -First 1)
         devices = @($devices.lines)
         device_query_status = $devices.status
+        device_query_exit_code = $devices.exit_code
         device_query_detail = $devices.detail
       }
   register: pixel_adb_verification
