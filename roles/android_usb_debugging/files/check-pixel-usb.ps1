@@ -16,7 +16,30 @@ Write-Host 'ADB version:'
 & $adb version
 Write-Host ''
 Write-Host 'ADB devices:'
-& $adb devices -l
+# adb can hang while starting its background server or probing forwarded USB.
+# Avoid inheriting this PowerShell session's handles and impose a hard limit.
+$outFile = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + '.adb.out')
+$errFile = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + '.adb.err')
+$adbProcess = $null
+try {
+  $adbProcess = Start-Process -FilePath $adb -ArgumentList @('devices', '-l') `
+    -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+  if (-not $adbProcess.WaitForExit(20000)) {
+    try { $adbProcess.Kill() } catch { }
+    $adbProcess.WaitForExit(5000) | Out-Null
+    Write-Warning 'adb devices -l timed out after 20 seconds. Check USB forwarding and whether the ADB server is responding.'
+  } else {
+    Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue
+    if ($adbProcess.ExitCode -ne 0) {
+      Write-Warning "adb devices -l exited with code $($adbProcess.ExitCode)"
+    }
+  }
+  $errorOutput = Get-Content -LiteralPath $errFile -ErrorAction SilentlyContinue
+  if ($errorOutput) { Write-Host ($errorOutput -join [Environment]::NewLine) }
+} finally {
+  Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
+  if ($null -ne $adbProcess) { $adbProcess.Dispose() }
+}
 Write-Host ''
 Write-Host 'USB devices with Google VID 18D1 currently visible to Shadow:'
 $google = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object {
