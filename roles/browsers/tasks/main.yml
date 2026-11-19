@@ -58,3 +58,50 @@
 - name: Display installed interactive browsers
   ansible.builtin.debug:
     var: browser_installation.result
+
+# Playwright's WebKit is a test engine, NOT Apple Safari. It is useful for
+# cross-engine PWA checks; real iOS Safari requires Apple hardware/cloud Macs.
+- name: Install Playwright WebKit engine for iPhone-like PWA testing
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $node = 'C:\Program Files\nodejs\node.exe'
+      $npm = 'C:\Program Files\nodejs\npm.cmd'
+      if (-not (Test-Path -LiteralPath $node) -or -not (Test-Path -LiteralPath $npm)) {
+        throw 'Node.js and npm must be installed before the WebKit test engine.'
+      }
+      $root = 'C:\InstaBounty\browser-testing'
+      $cache = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+      $env:PLAYWRIGHT_BROWSERS_PATH = $cache
+      if (-not (Test-Path -LiteralPath $root)) {
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+      }
+      if (-not (Test-Path -LiteralPath (Join-Path $root 'node_modules\playwright\cli.js'))) {
+        # Keep a dedicated tooling install, separate from each application's
+        # version-pinned Playwright dependencies and browser revisions.
+        & $npm install --prefix $root --no-audit --no-fund --no-save playwright@latest
+        if ($LASTEXITCODE -ne 0) {
+          throw "Unable to provision standalone Playwright tooling (exit $LASTEXITCODE)."
+        }
+        $Ansible.Changed = $true
+      }
+      $cacheBefore = @(Get-ChildItem -LiteralPath $cache -Directory -Filter 'webkit-*' -ErrorAction SilentlyContinue)
+      & $node (Join-Path $root 'node_modules\playwright\cli.js') install webkit
+      if ($LASTEXITCODE -ne 0) {
+        throw "Playwright WebKit installation failed (exit $LASTEXITCODE)."
+      }
+      $cacheAfter = @(Get-ChildItem -LiteralPath $cache -Directory -Filter 'webkit-*' -ErrorAction SilentlyContinue)
+      if ($cacheAfter.Count -eq 0) { throw 'Playwright did not populate its WebKit browser cache.' }
+      if ($cacheBefore.Count -eq 0 -or $cacheAfter.Count -ne $cacheBefore.Count) {
+        $Ansible.Changed = $true
+      }
+      $Ansible.Result = @{
+        engine = 'Playwright WebKit (not Apple Safari)'
+        cache = $cache
+        cli = (Join-Path $root 'node_modules\playwright\cli.js')
+      }
+  register: browsers_webkit
+
+- name: Report WebKit PWA test engine
+  ansible.builtin.debug:
+    var: browsers_webkit.result
