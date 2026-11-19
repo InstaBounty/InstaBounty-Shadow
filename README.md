@@ -110,6 +110,64 @@ The Ansible configuration installs and configures the main InstaBounty developme
 
 Postman is installed as the Windows desktop application for manual API testing during Gateway and service development.
 
+### Browsers and isolated test accounts
+
+The tagged `browsers` role installs **Google Chrome** and **Mozilla Firefox** as
+native Windows desktop browsers using winget. Microsoft Edge is used as the supported Windows alternative to retired Internet Explorer. It also installs **Playwright
+WebKit** into a standalone test-tool directory (`C:\\InstaBounty\\browser-testing`)
+and downloads its matching WebKit engine into the Shadow user's Playwright cache.
+Installation is rerunnable and does not overwrite existing browser profiles.
+
+**Safari is not available as a supported modern Windows browser.** Apple ended
+Safari for Windows at version 5.1.7. Playwright WebKit on Windows provides useful
+Safari-engine and iPhone-like PWA coverage, **but it is not Apple Safari or iOS**.
+Verify critical iOS-only behavior (home-screen installation, service workers,
+push notifications, permission prompts, keyboard, touch, and safe areas) on an
+actual iPhone or a supported macOS/iOS device testing service.
+
+To provision only these tools from the Ansible control machine:
+
+```bash
+ansible-playbook -i inventory.yml playbook.yml --tags browsers
+```
+
+To avoid sharing cached credentials, the role deploys
+`C:\\InstaBounty\\tools\\open-test-browser.ps1`. Open **PowerShell on Shadow**
+and launch each identity with its own persistent, separate browser profile:
+
+```powershell
+& 'C:\InstaBounty\tools\open-test-browser.ps1' -Browser Chrome -Role publisher -Url 'http://localhost:7100'
+& 'C:\InstaBounty\tools\open-test-browser.ps1' -Browser Firefox -Role support -Url 'http://localhost:7000'
+& 'C:\InstaBounty\tools\open-test-browser.ps1' -Browser Edge -Role user -Url 'http://127.0.0.1:7200'
+& 'C:\InstaBounty\tools\open-test-browser.ps1' -Browser WebKit -Role user -Url 'http://127.0.0.1:7200'
+```
+
+The four examples match the coordinated local startup: Chrome **publisher**,
+Firefox **support**, Edge **user**, and WebKit **user**. Even the two user sessions
+have separate browser-specific profile directories. The launcher creates profile directories
+under `%LOCALAPPDATA%\\InstaBounty\\TestBrowsers` and does not store
+credentials in source control. Never reuse the same profile for unrelated test
+users, and do not enable browser account sync for test identities. Dedicated
+profiles prevent routine cookie/session mixing; they are not a security boundary
+against malicious code or someone with access to the same Windows user account.
+
+The coordinated startup script, `python infrastructure/scripts/start-local-blockchain.py`,
+runs these four browser launch commands after starting its local service windows.
+It uses the workstation-installed launcher and prints a warning rather than
+stopping backends if a browser is missing.
+
+To run an interactive WebKit window from the standalone tool installation:
+
+```powershell
+& 'C:\Program Files\nodejs\node.exe' 'C:\InstaBounty\browser-testing\node_modules\playwright\cli.js' open --browser webkit 'http://localhost:3000'
+```
+
+WebKit automated tests should use project-pinned Playwright versions, separate
+`browser.newContext()` instances and unique `storageState` files per role.
+Do not share a `storageState` file between support, publisher and player tests.
+The standalone WebKit engine is a manual smoke-test convenience, not a replacement
+for project-specific pinned browser installs.
+
 ### Web development
 
 - Node.js LTS
