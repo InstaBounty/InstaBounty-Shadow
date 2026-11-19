@@ -115,3 +115,8 @@
   ansible.windows.win_copy:
     src: open-test-browser.ps1
     dest: 'C:\InstaBounty\tools\open-test-browser.ps1'
+
+- name: Deploy persistent WebKit user profile runner
+  ansible.windows.win_copy:
+    src: open-test-webkit.cjs
+    dest: 'C:\InstaBounty\tools\open-test-webkit.cjs'
