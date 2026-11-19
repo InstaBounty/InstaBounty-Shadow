@@ -105,3 +105,13 @@
 - name: Report WebKit PWA test engine
   ansible.builtin.debug:
     var: browsers_webkit.result
+
+- name: Create shared InstaBounty browser test helper directory
+  ansible.windows.win_file:
+    path: 'C:\InstaBounty\tools'
+    state: directory
+
+- name: Deploy isolated test browser profile launcher
+  ansible.windows.win_copy:
+    src: open-test-browser.ps1
+    dest: 'C:\InstaBounty\tools\open-test-browser.ps1'
