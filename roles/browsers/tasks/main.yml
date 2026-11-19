@@ -1,0 +1,60 @@
+---
+# Native browsers for interactive, account-isolated InstaBounty testing.
+# Safari cannot be provisioned on Windows; see the WebKit role and README.
+- name: Install Google Chrome and Mozilla Firefox for manual testing
+  ansible.windows.win_powershell:
+    script: |
+      $Ansible.Changed = $false
+      $winget = (Get-Command winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+      if (-not $winget) {
+        $candidate = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+        if (Test-Path -LiteralPath $candidate) { $winget = $candidate }
+      }
+      $browsers = @(
+        @{
+          name = 'Google Chrome'
+          id = 'Google.Chrome'
+          paths = @(
+            "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+            "${env:LOCALAPPDATA}\Google\Chrome\Application\chrome.exe"
+          )
+        },
+        @{
+          name = 'Mozilla Firefox'
+          id = 'Mozilla.Firefox'
+          paths = @(
+            "${env:ProgramFiles}\Mozilla Firefox\firefox.exe",
+            "${env:ProgramFiles(x86)}\Mozilla Firefox\firefox.exe"
+          )
+        }
+      )
+      $results = @()
+      foreach ($browser in $browsers) {
+        $found = @($browser.paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+        if ($found.Count -eq 0) {
+          if (-not $winget) {
+            throw "Cannot install $($browser.name): winget.exe is unavailable for the Shadow Ansible user. Install Microsoft App Installer/winget and rerun --tags browsers."
+          }
+          & $winget install --id $browser.id --exact --source winget --scope machine --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install $($browser.name) using winget (exit code $LASTEXITCODE)."
+          }
+          $Ansible.Changed = $true
+          $found = @($browser.paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+          if ($found.Count -eq 0) {
+            throw "$($browser.name) installer exited successfully but its executable was not found. Check the machine installation."
+          }
+        }
+        $results += @{
+          name = $browser.name
+          path = $found[0]
+          version = (Get-Item -LiteralPath $found[0]).VersionInfo.ProductVersion
+        }
+      }
+      $Ansible.Result = $results
+  register: browser_installation
+
+- name: Display installed interactive browsers
+  ansible.builtin.debug:
+    var: browser_installation.result
